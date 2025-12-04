@@ -238,7 +238,7 @@ export const getTradingDecision = async (
   } else if (totalEquity < 80) {
       stageName = STRATEGY_STAGES.STAGE_2.name;
       currentStageParams = STRATEGY_STAGES.STAGE_2;
-      stagePromptAddition = "【资金积累阶段】追求稳健增长，注重回撤控制，使用 trailing stop 锁定利润。";
+      stagePromptAddition = "【资金积累阶段】风险偏好中等，追求稳健增长，注重回撤控制，使用 trailing stop 锁定利润。";
   } else {
       stageName = STRATEGY_STAGES.STAGE_3.name;
       currentStageParams = STRATEGY_STAGES.STAGE_3;
@@ -308,7 +308,6 @@ ${marketDataBlock}
 
 2. **真实时事热点**:
    - 仅基于真实 6小时/24小时 币圈新闻。严禁编造。
-   - 用google搜索非中文热点事件，用百度搜索中文热点事件。
    - 若无重大新闻，回归技术面。
 
 3. **技术面研判 (Entry Logic)**:
@@ -317,8 +316,8 @@ ${marketDataBlock}
 
 4. **交易执行**:
    - **Action**: BUY / SELL / HOLD / CLOSE / UPDATE_TPSL
-   - **Update TPSL**: 如果你决定保护利润，Action 选 **UPDATE_TPSL**，并在 stop_loss 字段填入新的具体价格。
-   - **Stop Loss 必填**: 开新仓必须带止损。
+   - **仓位**: 动态计算 (${currentStageParams.risk_factor * 100}% 仓位风险)。
+   - **止盈止损**: 必须给出具体数值。Stage 1 允许止损稍微放宽以容忍高波动，但严禁扛单。
 
 **当前持仓数据参考**:
 - 开仓价: ${avgPx}
@@ -340,8 +339,8 @@ ${marketDataBlock}
       "confidence": "0-100%",
       "position_size": "动态计算",
       "leverage": "${currentStageParams.leverage}",
-      "profit_target": "价格 (TP)",
-      "stop_loss": "价格 (SL - 重点关注此字段用于保本)",
+      "profit_target": "价格 (TP, 2位小数)",
+      "stop_loss": "价格 (SL, 2位小数 - 重点关注此字段用于保本)",
       "invalidation_condition": "..."
     },
     "reasoning": "..."
@@ -381,6 +380,7 @@ ${marketDataBlock}
     const MIN_OPEN_VALUE = 100;
     let positionValue = finalMargin * safeLeverage;
 
+    // 自动修正逻辑：如果钱不够 100U 名义价值，但属于 Stage 1 且置信度高，尝试用最大余额
     if (positionValue < MIN_OPEN_VALUE && availableEquity * 0.9 * safeLeverage > MIN_OPEN_VALUE) {
         if (confidence >= 40) {
              finalMargin = MIN_OPEN_VALUE / safeLeverage;
