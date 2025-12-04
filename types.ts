@@ -44,6 +44,12 @@ export interface PositionData {
   tpTriggerPx?: string;
 }
 
+// Wrapper for account data to support multiple positions
+export interface AccountContext {
+  balance: AccountBalance;
+  positions: PositionData[];
+}
+
 export interface MarketDataCollection {
   ticker: TickerData | null;
   candles5m: CandleData[];
