@@ -1,8 +1,9 @@
+
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { MarketDataCollection, AccountBalance, PositionData, AIDecision, SystemLog, AppConfig } from './types';
+import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig } from './types';
 import { DEFAULT_CONFIG, INSTRUMENT_ID } from './constants';
 import * as okxService from './services/okxService';
 import * as aiService from './services/aiService';
@@ -21,7 +22,7 @@ app.use(express.static(path.join(__dirname, 'dist')));
 let config: AppConfig = { ...DEFAULT_CONFIG };
 let isRunning = false;
 let marketData: MarketDataCollection | null = null;
-let accountData: { balance: AccountBalance; position: PositionData | null } | null = null;
+let accountData: AccountContext | null = null;
 let latestDecision: AIDecision | null = null;
 let logs: SystemLog[] = [];
 let lastAnalysisTime = 0;
@@ -72,11 +73,13 @@ const runTradingLoop = async () => {
             const conf = decision.trading_decision?.confidence || "0%";
             addLog('INFO', `[${decision.stage_analysis.substring(0, 10)}..] 决策: ${decision.action} (置信度 ${conf})`);
 
+            // Find main position for management
+            const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
+
             // Execute Actions
             if (decision.action === 'UPDATE_TPSL') {
                  // Capture local reference for type narrowing
-                 const currentPos = accountData.position;
-                 if (currentPos) {
+                 if (primaryPosition) {
                     const newSL = decision.trading_decision.stop_loss;
                     const newTP = decision.trading_decision.profit_target;
                     
@@ -84,14 +87,14 @@ const runTradingLoop = async () => {
                     
                     if (isValid(newSL) || isValid(newTP)) {
                         // Ensure strict type check against 'net' to allow TS to narrow posSide to 'long' | 'short'
-                        if (currentPos.posSide === 'net') {
+                        if (primaryPosition.posSide === 'net') {
                              addLog('WARNING', '单向持仓模式不支持自动更新止损/止盈');
                         } else {
                             try {
                                 const res = await okxService.updatePositionTPSL(
                                     INSTRUMENT_ID, 
-                                    currentPos.posSide, 
-                                    currentPos.pos, 
+                                    primaryPosition.posSide, 
+                                    primaryPosition.pos, 
                                     isValid(newSL) ? newSL : undefined,
                                     isValid(newTP) ? newTP : undefined,
                                     config
@@ -113,16 +116,16 @@ const runTradingLoop = async () => {
             }
 
             // Rolling Logic
-            if (decision.action === 'HOLD' && accountData?.position) {
-                const uplRatio = parseFloat(accountData.position.uplRatio) * 100;
+            if (decision.action === 'HOLD' && primaryPosition) {
+                const uplRatio = parseFloat(primaryPosition.uplRatio) * 100;
                 if (uplRatio >= 50) {
                      addLog('SUCCESS', `触发自动滚仓: 收益率 ${uplRatio.toFixed(2)}%`);
                      try {
                          await okxService.addMargin({
                             instId: INSTRUMENT_ID,
-                            posSide: accountData.position.posSide,
+                            posSide: primaryPosition.posSide,
                             type: 'add',
-                            amt: (parseFloat(accountData.position.upl) * 0.5).toFixed(2)
+                            amt: (parseFloat(primaryPosition.upl) * 0.5).toFixed(2)
                          }, config);
                          addLog('TRADE', '滚仓成功');
                      } catch(e: any) {
