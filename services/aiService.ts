@@ -67,6 +67,8 @@ const calcMACD = (prices: number[]) => {
   
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
+  // Calculate EMA12 and EMA26 arrays to get MACD line array
+  // Simplified: Just calculating the *latest* values for prompt
   const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
   const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
   
@@ -234,21 +236,21 @@ export const getTradingDecision = async (
   if (totalEquity < 20) {
       stageName = STRATEGY_STAGES.STAGE_1.name;
       currentStageParams = STRATEGY_STAGES.STAGE_1;
-      stagePromptAddition = "【起步搏杀阶段】已降低杠杆至20x以控制风险。允许顺势补仓(DCA)和盈利加仓。";
+      stagePromptAddition = "【起步搏杀阶段】允许 **高风险高收益** 操作。支持亏损补仓 (DCA) 和 盈利加仓 (Pyramiding)。";
   } else if (totalEquity < 80) {
       stageName = STRATEGY_STAGES.STAGE_2.name;
       currentStageParams = STRATEGY_STAGES.STAGE_2;
-      stagePromptAddition = "【资金积累阶段】中等杠杆，稳健增长。";
+      stagePromptAddition = "【资金积累阶段】稳健增长，允许少量补仓和加仓。";
   } else {
       stageName = STRATEGY_STAGES.STAGE_3.name;
       currentStageParams = STRATEGY_STAGES.STAGE_3;
-      stagePromptAddition = "【稳健盈利阶段】低杠杆(5x)，保本第一。";
+      stagePromptAddition = "【稳健盈利阶段】保本第一，禁止逆势补仓。";
   }
 
   let positionStr = "当前无持仓 (Empty)";
   let avgPx = 0;
   
-  // Dynamic SL Levels
+  // Dynamic SL Levels Calculation based on Net PnL (Amount)
   let safeBreakEvenPrice = 0;
   let recommendedSL = 0;
   let profitLockStage = "A: 观察/浮亏期";
@@ -270,7 +272,7 @@ export const getTradingDecision = async (
       netPnL = upl - estimatedFee;
       netROI = margin > 0 ? (netPnL / margin) * 100 : 0;
 
-      // 2. 获取交易所保本价
+      // 2. 获取交易所保本价 (Use OKX breakEvenPx if available, otherwise estimate)
       let rawBreakEven = p.breakEvenPx ? parseFloat(p.breakEvenPx) : 0;
       if (rawBreakEven === 0) {
           rawBreakEven = isLong ? avgPx * 1.0012 : avgPx * 0.9988;
@@ -279,7 +281,7 @@ export const getTradingDecision = async (
 
       const buffer = currentPrice * 0.002;
 
-      // 3. 利润/亏损阶段判断
+      // 3. 利润/亏损阶段判断 (Refined Step-Ladder Logic - More Aggressive Protection)
       if (netPnL <= 0) {
           // --- 亏损风控逻辑 ---
           const isTrendAligned = isLong 
@@ -311,27 +313,34 @@ export const getTradingDecision = async (
                   : Math.min(parseFloat(p.slTriggerPx || "999999"), currentPrice * 1.01); 
           }
       } else {
-          // --- 盈利管理逻辑 ---
-          // Step-Ladder logic for SL
+          // --- 盈利管理逻辑 (高频保护 Aggressive Protection) ---
+          
           const distToBE = isLong ? (currentPrice - safeBreakEvenPrice) : (safeBreakEvenPrice - currentPrice);
-          const distPct = (distToBE / avgPx) * 100;
-
-          if (distPct < 0.5) {
-              profitLockStage = "B0: 微利震荡 (等待时机)";
-              recommendedSL = 0;
-              opSuggestion = "持有 (等待利润扩大)";
-          } else if (distPct >= 0.5 && distPct < 2.0) {
-              profitLockStage = "B1: 盈亏平衡保护 (Break-Even)";
+          // Profit Distance from BE
+          // We use Net ROI for stage determination to be precise on capital
+          
+          if (netROI < 2.0) {
+              // B1: 微利保本区 (Net ROI 0% ~ 2%) -> 立即保本
+              // 只要净收益为正，就立刻把止损提到保本价，不给市场反悔机会
+              profitLockStage = "B1: 立即保本 (Net PnL > 0)";
               recommendedSL = safeBreakEvenPrice;
-              opSuggestion = "调整止损至保本价";
-          } else if (distPct >= 2.0 && distPct < 5.0) {
-              profitLockStage = "C: 阶梯止盈 (Lock 40%)";
-              const lockAmt = distToBE * 0.4;
+              opSuggestion = "防御优先：调整止损至保本价";
+          } else if (netROI >= 2.0 && netROI < 5.0) {
+              // C1: 锁定小利 (2% ~ 5%) -> 锁定 30% 利润
+              profitLockStage = "C1: 锁定小利 (Lock 30%)";
+              const lockAmt = distToBE * 0.30;
               recommendedSL = isLong ? safeBreakEvenPrice + lockAmt : safeBreakEvenPrice - lockAmt;
-              opSuggestion = "锁定部分利润";
+              opSuggestion = "锁定 30% 浮盈";
+          } else if (netROI >= 5.0 && netROI < 10.0) {
+              // C2: 锁定中利 (5% ~ 10%) -> 锁定 50% 利润
+              profitLockStage = "C2: 锁定中利 (Lock 50%)";
+              const lockAmt = distToBE * 0.50;
+              recommendedSL = isLong ? safeBreakEvenPrice + lockAmt : safeBreakEvenPrice - lockAmt;
+              opSuggestion = "锁定 50% 浮盈";
           } else {
-              profitLockStage = "D: 深度止盈 (Lock 75%)";
-              const lockAmt = distToBE * 0.75;
+              // D: 深度获利 (> 10%) -> 锁定 80% 利润 (High Retention)
+              profitLockStage = "D: 深度止盈 (Lock 80%)";
+              const lockAmt = distToBE * 0.80;
               recommendedSL = isLong ? safeBreakEvenPrice + lockAmt : safeBreakEvenPrice - lockAmt;
               opSuggestion = "强趋势跟进 (Let Profits Run)";
           }
@@ -350,11 +359,12 @@ export const getTradingDecision = async (
           }
       }
 
-      // 4. 棘轮效应
+      // 4. 棘轮效应 (Strict Ratchet) - 确保止损不回撤
       const currentSL = p.slTriggerPx ? parseFloat(p.slTriggerPx) : 0;
       if (recommendedSL > 0) {
           if (isLong) {
-               if (recommendedSL > currentPrice - buffer) recommendedSL = currentPrice - buffer;
+               if (recommendedSL > currentPrice - buffer) recommendedSL = currentPrice - buffer; // 挂单安全距离
+               // 棘轮: 新止损必须 >= 旧止损
                if (currentSL > 0 && recommendedSL < currentSL) {
                    console.log(`[Ratchet] 修正: 新止损 ${recommendedSL.toFixed(2)} < 旧止损 ${currentSL}，维持旧止损`);
                    recommendedSL = currentSL; 
@@ -362,6 +372,7 @@ export const getTradingDecision = async (
                }
           } else { 
                if (recommendedSL < currentPrice + buffer) recommendedSL = currentPrice + buffer;
+               // 棘轮: 新止损必须 <= 旧止损
                if (currentSL > 0 && recommendedSL > currentSL) {
                    console.log(`[Ratchet] 修正: 新止损 ${recommendedSL.toFixed(2)} > 旧止损 ${currentSL}，维持旧止损`);
                    recommendedSL = currentSL;
@@ -423,22 +434,22 @@ ${marketDataBlock}
 - **余额**: ${availableEquity.toFixed(2)} U
 - **持仓状态**: ${positionStr}
 
-**三、核心决策指令 (HIGHEST PRIORITY: RISK, DCA & PROFIT)**:
+**三、核心决策指令 (HIGHEST PRIORITY: AGGRESSIVE PROFIT PROTECTION)**:
 
-1. **首次开仓风控 (Initial Entry Rules)**:
-   - **最小金额门槛**: 首次开仓的 **占用保证金** 必须 >= 0.5 USDT。
-     - **注意**: 保证金 = 市值 / 杠杆。例如 20x 杠杆下，需要开仓市值 >= 10U。
-     - **不要误判**: 如果余额 > 0.6U，资金充足，请勿因为"余额不足"放弃开仓。
-   - **最大止损**: 首次开仓止损造成的亏损，**绝不允许超过保证金 20%**。确保 "(Abs(Entry - SL) / Entry) * Leverage < 0.2"。
-
-2. **补仓与加仓机制 (Dynamic Sizing)**:
-   - **亏损补仓 (DCA)**: 如果【操作建议】提示 "建议补仓"，且趋势未破，执行 BUY/SELL 摊低成本。
-   - **盈利加仓 (Pyramiding)**: 如果【操作建议】提示 "顺势加仓"，且趋势强劲，执行 BUY/SELL 扩大战果。
-   - **注意**: 无论是补仓还是加仓，执行后必须重新评估并设置新的止损。
-
-3. **利润保护机制 (Profit Locking - B/C/D 阶段)**:
-   - **执行**: 若净收益为正，且【推荐止损】有具体数值，请严格执行 **UPDATE_TPSL**。
+1. **激进的利润保护 (Aggressive Protection Rules)**:
+   - **核心原则**: 只要【净盈亏 (Net PnL)】> 0，哪怕只有微利，也要立即建立防线！
+   - **执行逻辑**: 请严格参考【风控与操作建议】中的 **推荐止损**。
+     - 如果推荐值 > 0 且与当前 SL 不同，**必须** 发出 **UPDATE_TPSL** 指令。
+     - 哪怕只是将止损上移 0.5U，也是对本金负责。
    - **棘轮规则**: 严禁回调止损！只允许向更有利于盈利的方向移动。
+
+2. **首次开仓风控 (Initial Entry Rules)**:
+   - **最小金额门槛**: 首次开仓的 **占用保证金** 必须 >= 0.5 USDT。
+   - **最大止损**: 首次开仓止损造成的亏损，**绝不允许超过保证金 20%**。
+
+3. **补仓与加仓机制 (Dynamic Sizing)**:
+   - **亏损补仓 (DCA)**: 仅在趋势未破时（A1阶段）允许，按需补仓。
+   - **盈利加仓 (Pyramiding)**: 仅在趋势强劲且已锁定部分利润时允许。
 
 4. **实时联网搜索 (ONLINE SEARCH)**:
    - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
@@ -475,7 +486,7 @@ ${marketDataBlock}
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY, NO MARKDOWN:\n" + responseSchema },
-        { role: "user", content: "请调用你的搜索能力获取实时数据，并根据【亏损补仓】、【盈利加仓】及【首单风控】逻辑给出指令。" }
+        { role: "user", content: "请调用你的搜索能力获取实时数据，并根据【激进利润保护】逻辑给出指令。" }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
@@ -505,9 +516,8 @@ ${marketDataBlock}
     let positionValue = finalMargin * safeLeverage;
 
     // --- 强制修正：首仓保证金检查 (Min Margin 0.5U) ---
-    // 逻辑：如果当前无持仓，确保保证金 >= 0.5U
     const isInitialOpen = !hasPosition;
-    const MIN_MARGIN = 0.5; // 0.5U Margin Minimum
+    const MIN_MARGIN = 0.5;
 
     if (isInitialOpen && finalMargin < MIN_MARGIN) {
         if (availableEquity > MIN_MARGIN * 1.05) {
