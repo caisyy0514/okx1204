@@ -250,13 +250,25 @@ export const getTradingDecision = async (
   let avgPx = 0;
   let uplRatio = 0;
   let upl = 0;
+  let breakEvenPrice = 0;
   
   if (hasPosition) {
       const p = primaryPosition!;
       avgPx = parseFloat(p.avgPx);
       upl = parseFloat(p.upl);
       uplRatio = parseFloat(p.uplRatio) * 100;
+      
+      // Calculate Break-Even Price (AvgPx +/- Fees)
+      // Estimate fees + slippage as ~0.15% (0.0015)
+      // Long: Avg * 1.0015, Short: Avg * 0.9985
+      if (p.posSide === 'long') {
+          breakEvenPrice = avgPx * 1.0015;
+      } else if (p.posSide === 'short') {
+          breakEvenPrice = avgPx * 0.9985;
+      }
+
       positionStr = `持有 ${p.posSide} ${p.pos}张, 开仓均价 ${p.avgPx}, 未结盈亏 ${p.upl} U (${uplRatio.toFixed(2)}%)
+      预估保本价 (含手续费): ${breakEvenPrice.toFixed(2)}
       当前止损价 (SL): ${p.slTriggerPx || "未设置"}
       当前止盈价 (TP): ${p.tpTriggerPx || "未设置"}`;
   }
@@ -298,21 +310,26 @@ ${marketDataBlock}
 
 **三、核心决策指令 (HIGHEST PRIORITY: PROFIT PROTECTION & REAL-TIME DATA)**:
 
-1. **实时联网搜索 (ONLINE SEARCH)**:
-   - **指令**: 请立即调用你的联网搜索能力，查询全网最新的 Crypto 热点。
-   - **目标**: 寻找最近 6小时/24小时 内影响 ETH 价格的 **真实事件**。
-   - **禁止模拟**: 不要编造数据。如果你无法连接网络，请诚实说明并基于技术面决策。
+1. **利润保护与资金磨损控制 (Profit Protection - 核心优化)**:
+   - **优先保本原则**: 在条件允许时（即浮盈足以覆盖手续费时，建议浮盈 > 0.6%），**必须优先**将止损调整到 **预估保本价** 之上（对于多单）或之下（对于空单）。
+   - **避免资金磨损**: 如果浮盈微薄（< 0.3%），不要急于调整止损到保本位，以免被微小波动扫损，导致本金被手续费蚕食。
+   - **操作指令**: 只要满足保本条件，请立即发出 **UPDATE_TPSL** 指令，设置新的 stop_loss。
 
-2. **利润保护与本金安全 (TPSL Priority)**:
-   - **规则**: 如果持有仓位且有盈利，**首选动作是 UPDATE_TPSL (调整止损) 而不是 CLOSE**。
-   - **保本逻辑**: 浮盈 > 0.5% -> 止损上移至开仓价 (Break-Even)。
-   - **锁利逻辑**: 浮盈 > 10% -> 锁定 5% 利润。
+2. **浮亏容忍与等待时机 (Volatility Tolerance)**:
+   - **允许浮亏**: 在未达到保本触发点之前，**允许承担一定的合理浮亏**。
+   - **拒绝频繁止损**: 只要未触及初始硬止损（通常为 -5% 或关键支撑位），**不要急于手动平仓 (CLOSE)**。
+   - **逻辑**: 频繁的微小止损是资金磨损的最大来源。请耐心等待市场调整，除非趋势发生根本性逆转。
 
-3. **技术面研判**:
+3. **实时联网搜索 (ONLINE SEARCH)**:
+   - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
+   - **禁止模拟**: 必须基于真实数据。
+
+4. **技术面研判**:
    - 关注量价背离和共振信号。
 
-4. **交易执行**:
+5. **交易执行**:
    - **Action**: BUY / SELL / HOLD / CLOSE / UPDATE_TPSL
+   - **Update TPSL**: 保护利润时使用。
    - **Stop Loss 必填**: 开新仓必须带止损。
 
 请生成纯净的 JSON 格式交易决策。
