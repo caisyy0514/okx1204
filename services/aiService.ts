@@ -67,6 +67,8 @@ const calcMACD = (prices: number[]) => {
   
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
+  // Calculate EMA12 and EMA26 arrays to get MACD line array
+  // Simplified: Just calculating the *latest* values for prompt
   const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
   const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
   
@@ -390,7 +392,7 @@ export const getTradingDecision = async (
 
   const systemPrompt = `
 你是一名专注于ETH合约的 **超短线战神策略交易员**。
-你拥有最全面的市场数据，并具备 **实时联网搜索能力 (Real-Time Web Search)**。
+你拥有全面的市场数据，并具备 **实时联网搜索能力 (Real-Time Web Search)**。
 
 **一、全面行情分析数据**:
 ${marketDataBlock}
@@ -405,7 +407,7 @@ ${marketDataBlock}
 
 1. **首次开仓风控 (Initial SL Rule)**:
    - **绝对红线**: 首次开仓时设置的止损价，**绝不允许导致超过保证金 20% 的净亏损**。
-   - **计算逻辑**: 如果你 Action 是 BUY/SELL，请务必计算 stop_loss，确保 `|Entry - SL| / Entry * Leverage < 0.2`。
+   - **计算逻辑**: 如果你 Action 是 BUY/SELL，请务必计算 stop_loss，确保 "(Abs(Entry - SL) / Entry) * Leverage < 0.2"。
    - 如果技术面要求的止损位过宽（亏损会超过20%），则 **放弃开仓 (HOLD)** 或 **降低仓位**。
 
 2. **亏损补仓机制 (Strategic DCA - 仅在 A1 阶段)**:
