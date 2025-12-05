@@ -137,7 +137,7 @@ const callDeepSeek = async (apiKey: string, messages: any[]) => {
                 model: "deepseek-chat",
                 messages: messages,
                 stream: false,
-                temperature: 1.1, // 略微提高温度以允许更灵活的分析
+                temperature: 1.0, // 降低一点温度，使逻辑更严谨
                 max_tokens: 4096,
                 response_format: { type: 'json_object' }
             })
@@ -250,7 +250,11 @@ export const getTradingDecision = async (
   let avgPx = 0;
   let uplRatio = 0;
   let upl = 0;
+  
+  // Dynamic SL Levels Calculation
   let breakEvenPrice = 0;
+  let lockProfitPrice_Level1 = 0; // Lock small profit
+  let lockProfitPrice_Level2 = 0; // Lock big profit
   
   if (hasPosition) {
       const p = primaryPosition!;
@@ -258,19 +262,36 @@ export const getTradingDecision = async (
       upl = parseFloat(p.upl);
       uplRatio = parseFloat(p.uplRatio) * 100;
       
-      // Calculate Break-Even Price (AvgPx +/- Fees)
-      // Estimate fees + slippage as ~0.15% (0.0015)
-      // Long: Avg * 1.0015, Short: Avg * 0.9985
-      if (p.posSide === 'long') {
-          breakEvenPrice = avgPx * 1.0015;
-      } else if (p.posSide === 'short') {
-          breakEvenPrice = avgPx * 0.9985;
+      const isLong = p.posSide === 'long';
+      // Fee estimation ~0.15% round trip
+      const feeBuffer = avgPx * 0.0015; 
+
+      if (isLong) {
+          breakEvenPrice = avgPx + feeBuffer; // Price must go UP to break even
+          // If price moves up 2%, lock 1% profit
+          lockProfitPrice_Level1 = avgPx + (currentPrice - avgPx) * 0.5; 
+          // If price moves up 5%, lock 3.5% profit
+          lockProfitPrice_Level2 = currentPrice - (avgPx * 0.015); // Trail closely
+      } else {
+          breakEvenPrice = avgPx - feeBuffer; // Price must go DOWN to break even
+          lockProfitPrice_Level1 = avgPx - (avgPx - currentPrice) * 0.5;
+          lockProfitPrice_Level2 = currentPrice + (avgPx * 0.015);
       }
 
-      positionStr = `持有 ${p.posSide} ${p.pos}张, 开仓均价 ${p.avgPx}, 未结盈亏 ${p.upl} U (${uplRatio.toFixed(2)}%)
-      预估保本价 (含手续费): ${breakEvenPrice.toFixed(2)}
-      当前止损价 (SL): ${p.slTriggerPx || "未设置"}
-      当前止盈价 (TP): ${p.tpTriggerPx || "未设置"}`;
+      positionStr = `
+      持有: ${p.posSide.toUpperCase()} ${p.pos}张
+      开仓均价: ${p.avgPx}
+      当前价格: ${currentPrice}
+      收益率: ${uplRatio.toFixed(2)}% (未结: ${p.upl} U)
+      ----------------------------------------
+      【系统计算参考值】
+      1. 预估保本价 (Break-Even): ${breakEvenPrice.toFixed(2)}
+      2. 推荐锁利价 (若收益>2%): ${lockProfitPrice_Level1.toFixed(2)}
+      3. 推荐锁利价 (若收益>5%): ${lockProfitPrice_Level2.toFixed(2)}
+      ----------------------------------------
+      当前生效止损 (SL): ${p.slTriggerPx || "⚠️未设置"}
+      当前生效止盈 (TP): ${p.tpTriggerPx || "⚠️未设置"}
+      `;
   }
 
   // --- 4. 构建 Prompt (Rich Format) ---
@@ -308,26 +329,37 @@ ${marketDataBlock}
 - **余额**: ${availableEquity.toFixed(2)} U
 - **持仓状态**: ${positionStr}
 
-**三、核心决策指令 (HIGHEST PRIORITY: PROFIT PROTECTION & REAL-TIME DATA)**:
+**三、核心决策指令 (HIGHEST PRIORITY: PROFIT LADDER PROTECTION)**:
 
-1. **利润保护与资金磨损控制 (Profit Protection - 核心优化)**:
-   - **优先保本原则**: 在条件允许时（即浮盈足以覆盖手续费时，建议浮盈 > 0.6%），**必须优先**将止损调整到 **预估保本价** 之上（对于多单）或之下（对于空单）。
-   - **避免资金磨损**: 如果浮盈微薄（< 0.3%），不要急于调整止损到保本位，以免被微小波动扫损，导致本金被手续费蚕食。
-   - **操作指令**: 只要满足保本条件，请立即发出 **UPDATE_TPSL** 指令，设置新的 stop_loss。
+1. **阶梯式止盈与浮亏容忍 (Ladder Trailing Stop Logic)**:
+   请严格根据当前的 **收益率 (ROI)** 决定止损调整策略：
 
-2. **浮亏容忍与等待时机 (Volatility Tolerance)**:
-   - **允许浮亏**: 在未达到保本触发点之前，**允许承担一定的合理浮亏**。
-   - **拒绝频繁止损**: 只要未触及初始硬止损（通常为 -5% 或关键支撑位），**不要急于手动平仓 (CLOSE)**。
-   - **逻辑**: 频繁的微小止损是资金磨损的最大来源。请耐心等待市场调整，除非趋势发生根本性逆转。
+   *   **阶段 A: 浮亏或微利期 (ROI < 0.6%)**: 
+       - **策略**: **容忍波动**。不要急于将止损移至保本价，以免被正常震荡扫出。
+       - **动作**: 保持初始止损 (HOLD)，除非技术形态完全破位。
 
-3. **实时联网搜索 (ONLINE SEARCH)**:
+   *   **阶段 B: 保本期 (0.6% <= ROI < 2%)**:
+       - **策略**: **本金安全第一**。利润已覆盖手续费。
+       - **动作**: 立即执行 **UPDATE_TPSL**，将止损上移至 **预估保本价** (Break-Even) 附近。
+
+   *   **阶段 C: 利润增长期 (2% <= ROI < 5%)**:
+       - **策略**: **锁定部分利润**。
+       - **动作**: 执行 **UPDATE_TPSL**，将止损上移至 **推荐锁利价 Level 1** (锁定约 50% 的浮盈)。
+
+   *   **阶段 D: 利润收割期 (ROI >= 5%)**:
+       - **策略**: **紧跟趋势 (Tight Trail)**。防止大幅回撤。
+       - **动作**: 执行 **UPDATE_TPSL**，将止损上移至 **推荐锁利价 Level 2** (锁定约 80% 的浮盈)。
+
+   *   **注意**: 止损价格只能 **更有利于盈利** 的方向移动 (单向棘轮)，严禁回调止损线（严禁扛单）。
+
+2. **实时联网搜索 (ONLINE SEARCH)**:
    - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
    - **禁止模拟**: 必须基于真实数据。
 
-4. **技术面研判**:
+3. **技术面研判**:
    - 关注量价背离和共振信号。
 
-5. **交易执行**:
+4. **交易执行**:
    - **Action**: BUY / SELL / HOLD / CLOSE / UPDATE_TPSL
    - **Update TPSL**: 保护利润时使用。
    - **Stop Loss 必填**: 开新仓必须带止损。
@@ -347,7 +379,7 @@ ${marketDataBlock}
       "position_size": "动态计算",
       "leverage": "${currentStageParams.leverage}",
       "profit_target": "价格 (TP, 2位小数)",
-      "stop_loss": "价格 (SL, 2位小数 - 重点关注此字段用于保本)",
+      "stop_loss": "价格 (SL, 2位小数 - 重点关注此字段，执行阶梯止盈)",
       "invalidation_condition": "..."
     },
     "reasoning": "..."
@@ -357,7 +389,7 @@ ${marketDataBlock}
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY, NO MARKDOWN:\n" + responseSchema },
-        { role: "user", content: "请调用你的搜索能力获取实时数据，并结合持仓给出最优操作指令。" }
+        { role: "user", content: "请调用你的搜索能力获取实时数据，并根据【阶梯式止盈逻辑】检查是否需要调整止损。" }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
