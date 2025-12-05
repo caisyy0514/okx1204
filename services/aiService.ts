@@ -67,8 +67,6 @@ const calcMACD = (prices: number[]) => {
   
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
-  // Calculate EMA12 and EMA26 arrays to get MACD line array
-  // Simplified: Just calculating the *latest* values for prompt
   const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
   const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
   
@@ -227,6 +225,7 @@ export const getTradingDecision = async (
 
   // --- 3. 账户与阶段 ---
   const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
+  const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
   
   let stageName = "";
   let currentStageParams = null;
@@ -235,18 +234,17 @@ export const getTradingDecision = async (
   if (totalEquity < 20) {
       stageName = STRATEGY_STAGES.STAGE_1.name;
       currentStageParams = STRATEGY_STAGES.STAGE_1;
-      stagePromptAddition = "【起步搏杀阶段】当前资金较少，允许 **高风险高收益** 操作。如果趋势完好但出现回调，**允许补仓 (DCA)** 以摊低成本。";
+      stagePromptAddition = "【起步搏杀阶段】允许 **高风险高收益** 操作。支持亏损补仓 (DCA) 和 盈利加仓 (Pyramiding)。";
   } else if (totalEquity < 80) {
       stageName = STRATEGY_STAGES.STAGE_2.name;
       currentStageParams = STRATEGY_STAGES.STAGE_2;
-      stagePromptAddition = "【资金积累阶段】风险偏好中等，追求稳健增长。允许少量补仓。";
+      stagePromptAddition = "【资金积累阶段】稳健增长，允许少量补仓和加仓。";
   } else {
       stageName = STRATEGY_STAGES.STAGE_3.name;
       currentStageParams = STRATEGY_STAGES.STAGE_3;
-      stagePromptAddition = "【稳健盈利阶段】低风险偏好，保本第一。禁止逆势补仓，错了就认赔。";
+      stagePromptAddition = "【稳健盈利阶段】保本第一，禁止逆势补仓。";
   }
 
-  const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
   let positionStr = "当前无持仓 (Empty)";
   let avgPx = 0;
   
@@ -256,7 +254,7 @@ export const getTradingDecision = async (
   let profitLockStage = "A: 观察/浮亏期";
   let netPnL = 0;
   let netROI = 0;
-  let dcaSuggestion = "无需补仓";
+  let opSuggestion = "暂无建议";
   
   if (hasPosition) {
       const p = primaryPosition!;
@@ -288,9 +286,7 @@ export const getTradingDecision = async (
               ? (currentPrice > ema20 && macdData.hist > -5) 
               : (currentPrice < ema20 && macdData.hist < 5);
           
-          // DCA 补仓判断
           const canDCA = currentStageParams.allow_dca;
-          // 当前持仓名义价值 / 总权益
           const currentPosRatio = positionValue / totalEquity;
           const maxPosRatio = (currentStageParams as any).max_pos_ratio || 2.0;
           const hasSpaceForDCA = currentPosRatio < maxPosRatio;
@@ -300,53 +296,80 @@ export const getTradingDecision = async (
           if (isTrendAligned) {
               if (canDCA && hasSpaceForDCA && drawdownPct > 1.5 && drawdownPct < 8) {
                   profitLockStage = "A1: 良性回调 (建议补仓 DCA)";
-                  dcaSuggestion = isLong 
-                      ? `建议 BUY (加仓) ${posSize * 0.5} 张，摊低成本`
-                      : `建议 SELL (加仓) ${posSize * 0.5} 张，摊低成本`;
+                  opSuggestion = isLong 
+                      ? `建议 BUY (补仓) ${posSize * 0.5} 张`
+                      : `建议 SELL (补仓) ${posSize * 0.5} 张`;
                   recommendedSL = 0; 
               } else {
                   profitLockStage = "A1: 正常震荡 (HOLD)";
-                  dcaSuggestion = "暂不补仓 (幅度不够或仓位已满)";
+                  opSuggestion = "暂不补仓 (幅度不够或仓位已满)";
                   recommendedSL = 0; 
               }
           } else {
               profitLockStage = "A2: 趋势转弱 (风控预警)";
-              dcaSuggestion = "禁止补仓 (趋势破坏)";
+              opSuggestion = "禁止补仓 (趋势破坏)";
               recommendedSL = isLong 
                   ? Math.max(parseFloat(p.slTriggerPx || "0"), currentPrice * 0.99) 
                   : Math.min(parseFloat(p.slTriggerPx || "999999"), currentPrice * 1.01); 
           }
-      } else if (netPnL > 0 && netROI < 10) {
-          profitLockStage = "B: 微利保本期 (Break-Even)";
-          recommendedSL = safeBreakEvenPrice;
-      } else if (netROI >= 10 && netROI < 30) {
-          profitLockStage = "C: 利润增长期 (Lock 50%)";
-          const profitDiff = Math.abs(currentPrice - avgPx);
-          recommendedSL = isLong 
-              ? avgPx + (profitDiff * 0.5) 
-              : avgPx - (profitDiff * 0.5);
       } else {
-          profitLockStage = "D: 丰厚利润期 (Lock 80%)";
-          const profitDiff = Math.abs(currentPrice - avgPx);
-          recommendedSL = isLong 
-              ? avgPx + (profitDiff * 0.8) 
-              : avgPx - (profitDiff * 0.8);
+          // --- 盈利管理逻辑 (Profit Management) ---
+          // Pyramiding Logic (盈利加仓)
+          const isStrongTrend = isLong
+              ? (currentPrice > boll.upper || (macdData.hist > 0 && rsi14 > 55))
+              : (currentPrice < boll.lower || (macdData.hist < 0 && rsi14 < 45));
+          
+          const currentPosRatio = positionValue / totalEquity;
+          const maxPosRatio = (currentStageParams as any).max_pos_ratio || 2.0;
+          const hasSpace = currentPosRatio < maxPosRatio;
+
+          // 如果趋势强劲且有空间，且盈利超过 10%，建议顺势加仓
+          if (isStrongTrend && hasSpace && netROI > 10) {
+               opSuggestion = isLong 
+                  ? `建议 BUY (追涨加仓) ${posSize * 0.3} 张`
+                  : `建议 SELL (追跌加仓) ${posSize * 0.3} 张`;
+          } else {
+               opSuggestion = "持仓待涨 (Let Profits Run)";
+          }
+
+          // Trailing Stop Logic (棘轮止损)
+          if (netROI < 10) {
+              profitLockStage = "B: 微利保本期 (Break-Even)";
+              recommendedSL = safeBreakEvenPrice;
+          } else if (netROI >= 10 && netROI < 30) {
+              profitLockStage = "C: 利润增长期 (Lock 50%)";
+              const profitDiff = Math.abs(currentPrice - avgPx);
+              recommendedSL = isLong 
+                  ? avgPx + (profitDiff * 0.5) 
+                  : avgPx - (profitDiff * 0.5);
+          } else {
+              profitLockStage = "D: 丰厚利润期 (Lock 80%)";
+              const profitDiff = Math.abs(currentPrice - avgPx);
+              recommendedSL = isLong 
+                  ? avgPx + (profitDiff * 0.8) 
+                  : avgPx - (profitDiff * 0.8);
+          }
       }
 
-      // 4. 棘轮效应
+      // 4. 棘轮效应 (Hard Enforcement) - 严格修正 recommendedSL
+      // 确保推荐止损永远优于当前止损
       const currentSL = p.slTriggerPx ? parseFloat(p.slTriggerPx) : 0;
       if (recommendedSL > 0) {
           if (isLong) {
                if (recommendedSL > currentPrice - buffer) recommendedSL = currentPrice - buffer;
+               // 棘轮: 新止损必须 >= 旧止损
                if (currentSL > 0 && recommendedSL < currentSL) {
+                   console.log(`[Ratchet] 修正: 新止损 ${recommendedSL} < 旧止损 ${currentSL}，维持旧止损`);
                    recommendedSL = currentSL; 
-                   profitLockStage += " [维持更优旧止损]";
+                   profitLockStage += " [棘轮生效:维持原SL]";
                }
           } else { 
                if (recommendedSL < currentPrice + buffer) recommendedSL = currentPrice + buffer;
+               // 棘轮: 新止损必须 <= 旧止损
                if (currentSL > 0 && recommendedSL > currentSL) {
+                   console.log(`[Ratchet] 修正: 新止损 ${recommendedSL} > 旧止损 ${currentSL}，维持旧止损`);
                    recommendedSL = currentSL;
-                   profitLockStage += " [维持更优旧止损]";
+                   profitLockStage += " [棘轮生效:维持原SL]";
                }
           }
       }
@@ -360,8 +383,8 @@ export const getTradingDecision = async (
       ----------------------------------------
       【风控与操作建议】
       * 当前阶段: ${profitLockStage}
-      * 补仓建议: ${dcaSuggestion}
-      * 推荐止损: ${recommendedSL > 0 ? recommendedSL.toFixed(2) : "无"}
+      * 操作建议: ${opSuggestion}
+      * 推荐止损 (棘轮修正后): ${recommendedSL > 0 ? recommendedSL.toFixed(2) : "无"}
       ----------------------------------------
       当前生效止损 (SL): ${p.slTriggerPx || "⚠️未设置"}
       技术面: EMA20=${ema20.toFixed(2)}, MACD Hist=${macdData.hist.toFixed(2)}
@@ -408,25 +431,21 @@ ${marketDataBlock}
 1. **首次开仓风控 (Initial Entry Rules)**:
    - **最小市值门槛**: 首次开仓的 **实际持仓市值 (Notional Value)** 必须 >= 50 USDT。
      - 注意：Notional Value = 保证金 × 杠杆。不是指保证金要 50U。
-   - **最大止损**: 首次开仓止损造成的亏损，**绝不允许超过保证金 20%**。确保 "Abs(Entry - SL) / Entry * Leverage < 0.2"。
+   - **最大止损**: 首次开仓止损造成的亏损，**绝不允许超过保证金 20%**。确保 "(Abs(Entry - SL) / Entry) * Leverage < 0.2"。
 
-2. **亏损补仓机制 (Strategic DCA - 仅在 A1 阶段)**:
-   - **条件**: 如果【风控与操作建议】中明确提示 "建议补仓 (DCA)"。
-   - **规则**: 补仓时 **不设最小金额限制**，按需补仓（例如补 0.5 倍仓位），以灵活摊低成本为准。
-   - **执行**: Action: BUY/SELL。
+2. **补仓与加仓机制 (Dynamic Sizing)**:
+   - **亏损补仓 (DCA)**: 如果【操作建议】提示 "建议补仓"，且趋势未破，执行 BUY/SELL 摊低成本。
+   - **盈利加仓 (Pyramiding)**: 如果【操作建议】提示 "追涨/追跌加仓"，且趋势强劲，执行 BUY/SELL 扩大战果。
+   - **注意**: 无论是补仓还是加仓，执行后必须重新评估并设置新的止损。
 
-3. **趋势破坏风控 (Stop Loss - A2/A3 阶段)**:
-   - **条件**: 如果提示 "趋势转弱" 或 "禁止补仓"。
-   - **执行**: 严禁补仓。必须执行 **UPDATE_TPSL** 收紧止损，或 **CLOSE** 离场。
+3. **利润保护机制 (Profit Locking - B/C/D 阶段)**:
+   - **执行**: 若净收益为正，严格按照【推荐止损】执行 **UPDATE_TPSL**。严禁回调止损。
 
-4. **利润保护机制 (Profit Locking - B/C/D 阶段)**:
-   - **执行**: 若净收益为正，严格按照【推荐新止损】执行 **UPDATE_TPSL**。
-
-5. **实时联网搜索 (ONLINE SEARCH)**:
-   - **指令**: 立即搜索全网 Crypto 热点。
+4. **实时联网搜索 (ONLINE SEARCH)**:
+   - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
    - **判断**: 若有突发重大利空，立即清仓。
 
-6. **交易执行**:
+5. **交易执行**:
    - **Action**: BUY / SELL / HOLD / CLOSE / UPDATE_TPSL
    - **Stop Loss**: 
       - UPDATE_TPSL: 填入推荐值。
@@ -457,7 +476,7 @@ ${marketDataBlock}
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY, NO MARKDOWN:\n" + responseSchema },
-        { role: "user", content: "请调用你的搜索能力获取实时数据，并根据【亏损补仓】、【利润保护】及【首单风控】逻辑给出指令。" }
+        { role: "user", content: "请调用你的搜索能力获取实时数据，并根据【亏损补仓】、【盈利加仓】及【首单风控】逻辑给出指令。" }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
@@ -486,75 +505,75 @@ ${marketDataBlock}
 
     let positionValue = finalMargin * safeLeverage;
 
-    // --- NEW LOGIC START ---
-    // 首次开仓限制 50U 市值 (Notional Value)，加仓不限
-    const isInitialOpen = !hasPosition;
-    const MIN_OPEN_VALUE = isInitialOpen ? 50 : 0; 
-
-    // Auto-correction for Initial Open (Ensure Notional >= 50U)
-    if (isInitialOpen && positionValue < MIN_OPEN_VALUE && availableEquity * 0.9 * safeLeverage > MIN_OPEN_VALUE) {
-        if (confidence >= 40) {
-             finalMargin = MIN_OPEN_VALUE / safeLeverage;
-             positionValue = MIN_OPEN_VALUE;
-             console.log(`[AI] 首次开仓修正: 提升至最小名义价值 ${MIN_OPEN_VALUE} USDT`);
+    // --- 强制修正：首仓市值检查 (Min Notional Value) ---
+    // 逻辑：如果当前无持仓，且计算出的开仓市值 < 50U，强制提升
+    if (!hasPosition && decision.action !== 'HOLD' && decision.action !== 'CLOSE' && decision.action !== 'UPDATE_TPSL') {
+        const MIN_OPEN_VALUE = 50;
+        if (positionValue < MIN_OPEN_VALUE) {
+            // Check if user has enough balance to cover 50U notional
+            // Required Margin = 50 / Leverage
+            const reqMargin = MIN_OPEN_VALUE / safeLeverage;
+            if (availableEquity > reqMargin * 1.05) { // +5% buffer
+                positionValue = MIN_OPEN_VALUE;
+                console.log(`[AI] 首次开仓强制修正: 市值提升至 ${MIN_OPEN_VALUE} USDT (原: ${(finalMargin * safeLeverage).toFixed(2)})`);
+            } else {
+                console.warn(`[AI] 首次开仓资金不足 (${availableEquity.toFixed(2)} < ${reqMargin.toFixed(2)})，无法满足50U市值，转为HOLD`);
+                decision.action = 'HOLD';
+                decision.size = "0";
+                decision.reasoning += ` [系统修正: 资金不足以开启50U市值的最小底仓]`;
+            }
         }
     }
 
     // --- 强制风控检查 (Max SL Distance) ---
-    // Rule: SL cannot exceed 20% loss of margin
     if (decision.action === 'BUY' || decision.action === 'SELL') {
-        // Check Min Value only for Initial Open
-        if (isInitialOpen && positionValue < MIN_OPEN_VALUE) {
-             console.warn(`[AI] 首次开仓价值过小 (${positionValue.toFixed(2)} U < 50 U)，转为 HOLD`);
-             decision.action = 'HOLD';
-             decision.size = "0";
-             decision.reasoning += ` [系统修正: 首次开仓市值不足 50 U]`;
+        let rawSize = parseFloat(decision.trading_decision.position_size || "0");
+        const calcSize = positionValue / (CONTRACT_VAL_ETH * currentPrice);
+        
+        let finalSize = calcSize;
+        // 如果是加仓/补仓，AI 给的 size 可能比较小，我们采纳 AI 的建议（只要不超过计算出的上限）
+        if (rawSize > 0 && rawSize < calcSize) {
+            finalSize = rawSize;
+        } else if (rawSize === 0) {
+            // AI 没给具体数值，使用自动计算的
+            finalSize = calcSize;
+        }
+
+        // SL Protection Check
+        const proposedSL = parseFloat(decision.trading_decision.stop_loss);
+        if (!isNaN(proposedSL) && proposedSL > 0) {
+            const maxDeviationPct = 0.20 / safeLeverage; 
+            let safeSL = proposedSL;
+            let corrected = false;
+
+            if (decision.action === 'BUY') {
+                const limitPrice = currentPrice * (1 - maxDeviationPct);
+                if (proposedSL < limitPrice) {
+                    safeSL = limitPrice;
+                    corrected = true;
+                }
+            } else { // SELL
+                const limitPrice = currentPrice * (1 + maxDeviationPct);
+                if (proposedSL > limitPrice) {
+                    safeSL = limitPrice;
+                    corrected = true;
+                }
+            }
+
+            if (corrected) {
+                console.warn(`[Risk Control] AI SL ${proposedSL} too loose. Adjusted to ${safeSL.toFixed(2)}`);
+                decision.trading_decision.stop_loss = safeSL.toFixed(2);
+                decision.reasoning += ` [系统修正: 止损已强制收紧至 ${safeSL.toFixed(2)} 以控制本金亏损 <20%]`;
+            }
+        }
+
+        const numContracts = Math.floor(finalSize * 100) / 100;
+        if (numContracts < 0.01) {
+            decision.action = 'HOLD';
+            decision.size = "0";
         } else {
-            // Sizing Logic
-            let rawSize = parseFloat(decision.trading_decision.position_size || "0");
-            const calcSize = positionValue / (CONTRACT_VAL_ETH * currentPrice);
-            
-            let finalSize = calcSize;
-            if (rawSize > 0 && rawSize < calcSize) {
-                finalSize = rawSize;
-            }
-
-            // SL Protection Check
-            const proposedSL = parseFloat(decision.trading_decision.stop_loss);
-            if (!isNaN(proposedSL) && proposedSL > 0) {
-                const maxDeviationPct = 0.20 / safeLeverage; 
-                let safeSL = proposedSL;
-                let corrected = false;
-
-                if (decision.action === 'BUY') {
-                    const limitPrice = currentPrice * (1 - maxDeviationPct);
-                    if (proposedSL < limitPrice) {
-                        safeSL = limitPrice;
-                        corrected = true;
-                    }
-                } else { // SELL
-                    const limitPrice = currentPrice * (1 + maxDeviationPct);
-                    if (proposedSL > limitPrice) {
-                        safeSL = limitPrice;
-                        corrected = true;
-                    }
-                }
-
-                if (corrected) {
-                    console.warn(`[Risk Control] AI SL ${proposedSL} too loose. Adjusted to ${safeSL.toFixed(2)}`);
-                    decision.trading_decision.stop_loss = safeSL.toFixed(2);
-                    decision.reasoning += ` [系统修正: 止损已强制收紧至 ${safeSL.toFixed(2)} 以控制本金亏损 <20%]`;
-                }
-            }
-
-            const numContracts = Math.floor(finalSize * 100) / 100;
-            if (numContracts < 0.01) {
-                decision.action = 'HOLD';
-                decision.size = "0";
-            } else {
-                decision.size = numContracts.toFixed(2);
-                decision.leverage = safeLeverage.toString();
-            }
+            decision.size = numContracts.toFixed(2);
+            decision.leverage = safeLeverage.toString();
         }
     } else {
         decision.size = "0";
