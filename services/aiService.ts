@@ -391,7 +391,77 @@ export const getTradingDecision = async (
       `;
   }
 
-  // --- 4. 构建 Prompt (Rich Format) ---
+   // --- 4. 强制保本逻辑 (Programmatic Force) ---
+  let forcedBreakEvenAction: AIDecision | null = null;
+  let systemMessage = "";
+
+  if (hasPosition) {
+      const p = primaryPosition!;
+      avgPx = parseFloat(p.avgPx);
+      const isLong = p.posSide === 'long';
+      const currentSL = p.slTriggerPx ? parseFloat(p.slTriggerPx) : 0;
+
+      // 计算安全保本价 (Entry +/- 0.15% to cover fees & slippage)
+      // 如果 OKX API 提供了 breakEvenPx，优先使用
+      let breakEvenPx = p.breakEvenPx ? parseFloat(p.breakEvenPx) : 0;
+      if (breakEvenPx === 0) {
+          breakEvenPx = isLong ? avgPx * 1.0015 : avgPx * 0.9985;
+      }
+
+      // 计算当前浮盈比例
+      const currentROI = isLong 
+          ? (currentPrice - avgPx) / avgPx 
+          : (avgPx - currentPrice) / avgPx;
+
+      // 强制保本触发阈值：0.6% (确保完全覆盖手续费并有微利)
+      const TRIGGER_ROI = 0.006; 
+
+      let needsForcedUpdate = false;
+
+      // 检查是否满足强制保本条件
+      if (currentROI > TRIGGER_ROI) {
+          // 如果当前没有止损，或者止损比保本价“差”，则强制更新
+          if (isLong) {
+              if (currentSL === 0 || currentSL < breakEvenPx) needsForcedUpdate = true;
+          } else {
+              if (currentSL === 0 || currentSL > breakEvenPx) needsForcedUpdate = true;
+          }
+      }
+
+      if (needsForcedUpdate) {
+          systemMessage = `[系统强制] 检测到浮盈 > 0.6%，且止损未设置在保本位。程序将强制执行保本策略。`;
+          // 构造强制决策
+          forcedBreakEvenAction = {
+              stage_analysis: "SYSTEM_FORCE_PROTECTION",
+              market_assessment: "PROFIT_PROTECTION",
+              hot_events_overview: "N/A",
+              eth_analysis: "N/A",
+              trading_decision: {
+                  action: 'update_tpsl',
+                  confidence: "100%",
+                  position_size: "0",
+                  leverage: currentStageParams.leverage.toString(),
+                  profit_target: "", // Keep existing or let OKX handle
+                  stop_loss: breakEvenPx.toFixed(2),
+                  invalidation_condition: "Mandatory Break-Even"
+              },
+              reasoning: `系统强制执行：浮盈已达标 (${(currentROI*100).toFixed(2)}%)，强制将止损移动至保本价 ${breakEvenPx.toFixed(2)} 以防止资金磨损。`,
+              action: 'UPDATE_TPSL',
+              size: "0",
+              leverage: currentStageParams.leverage.toString()
+          };
+      }
+
+      positionStr = `
+      持有: ${p.posSide.toUpperCase()} ${p.pos}张
+      开仓均价: ${p.avgPx} | 当前: ${currentPrice}
+      浮盈: ${(currentROI*100).toFixed(2)}%
+      保本价: ${breakEvenPx.toFixed(2)}
+      当前止损: ${p.slTriggerPx || "无"}
+      `;
+  }
+
+  // --- 5. 构建 Prompt (Rich Format) ---
   const marketDataBlock = `
 价格数据:
 - 收盘价：${currentPrice.toFixed(2)}
