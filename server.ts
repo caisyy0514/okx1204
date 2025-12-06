@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -44,7 +43,7 @@ const addLog = (type: SystemLog['type'], message: string) => {
 
 // --- Background Trading Loop ---
 const runTradingLoop = async () => {
-    // 1. Fetch Data
+    // 1. Fetch Data (Keep fetching OKX data frequently to maintain chart/UI updates)
     try {
         marketData = await okxService.fetchMarketData(config);
         accountData = await okxService.fetchAccountData(config);
@@ -55,16 +54,41 @@ const runTradingLoop = async () => {
 
     if (!isRunning) return;
 
-    // 2. AI Analysis Logic
+    // 2. AI Analysis Logic (With Dynamic Frequency Optimization)
     const now = Date.now();
-    // Analyze every 15 seconds (High Frequency for Ultra-Short Term)
-    if (now - lastAnalysisTime < 15000) return;
+    
+    // Default config
+    let aiInterval = 15000; 
+    let modeText = "初始化";
+
+    if (accountData) {
+        // Check for active position on the target instrument
+        const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
+        // Only consider actual size > 0 as holding (ignore dust or closed pos if any leftovers)
+        const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
+        
+        if (hasPosition) {
+            // [Holding Mode]: High Frequency (15s)
+            // Critical for Ratchet Stop Loss, Profit Taking, and Emergency Close
+            aiInterval = 15000; 
+            modeText = "持仓高频监测";
+        } else {
+            // [Empty Mode]: Low Frequency (60s)
+            // Save tokens while scanning for entry opportunities. 
+            // 60s is sufficient for 15m candle based strategies.
+            aiInterval = 60000; 
+            modeText = "空仓低频扫描";
+        }
+    }
+
+    // Check if enough time has passed based on dynamic interval
+    if (now - lastAnalysisTime < aiInterval) return;
 
     // Use setTimeout instead of setImmediate to avoid TS errors
     setTimeout(async () => {
         try {
             lastAnalysisTime = now;
-            addLog('INFO', '正在调用云端战神引擎 (超短线模式)...');
+            addLog('INFO', `正在调用云端战神引擎 (${modeText})...`);
             
             if (!marketData || !accountData) return;
 
@@ -149,7 +173,8 @@ const runTradingLoop = async () => {
 };
 
 // Start Loop
-// Check loop condition every 5 seconds (must be smaller than analysis interval)
+// Check loop condition every 5 seconds (must be smaller than min analysis interval)
+// This ensures market data is always fresh on the UI even if AI runs infrequently
 setInterval(runTradingLoop, 5000);
 
 // --- API Endpoints ---
