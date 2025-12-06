@@ -268,13 +268,35 @@ export const getTradingDecision = async (
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
       
-      // Strict Breakeven Calculation (Considering Opening + Closing Fees)
-      // Formula: Breakeven = Entry * (1 + Fee) / (1 - Fee) for Long
-      // Formula: Breakeven = Entry * (1 - Fee) / (1 + Fee) for Short
+      // Strict Breakeven Calculation
+      // 1. Calculate Local Estimate (Validation)
+      let localBreakeven = 0;
       if (p.posSide === 'long') {
-          breakevenPrice = entryPrice * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
+          localBreakeven = entryPrice * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
       } else {
-          breakevenPrice = entryPrice * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
+          localBreakeven = entryPrice * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
+      }
+
+      // 2. Get Exchange Data (Primary Source)
+      const exchangeBreakeven = parseFloat(p.breakEvenPx || "0");
+      
+      // 3. Decision & Validation Logic
+      let validationNote = "";
+      if (exchangeBreakeven > 0) {
+          breakevenPrice = exchangeBreakeven;
+          // Verify with local calc
+          const diff = Math.abs(exchangeBreakeven - localBreakeven);
+          const diffPct = (diff / localBreakeven) * 100;
+          
+          if (diffPct > 0.1) { // 0.1% tolerance
+              validationNote = `[数据警告] 交易所BE(${exchangeBreakeven}) 与 本地估算(${localBreakeven.toFixed(2)}) 差异 ${diffPct.toFixed(2)}%`;
+          } else {
+              validationNote = `[数据校验通过] (Exchange Data)`;
+          }
+      } else {
+          // Fallback to local if exchange data missing
+          breakevenPrice = localBreakeven;
+          validationNote = `[使用本地估算] (Exchange Data Unavailable)`;
       }
       
       // Calculate Real Net PnL (Floating PnL - Estimated Closing Fee - Estimated Opening Fee)
@@ -298,7 +320,7 @@ export const getTradingDecision = async (
       【净利润】: ${netPnL.toFixed(2)} U  <-- 决策核心依据
       
       === 保护锚点 ===
-      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)} (含手续费)
+      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)} ${validationNote}
       当前止损 (SL): ${p.slTriggerPx || "未设置"}
       当前止盈 (TP): ${p.tpTriggerPx || "未设置 (建议不设，用移动止损)"}
       `;
