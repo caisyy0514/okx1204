@@ -5,7 +5,7 @@ import HistoryModal from './components/HistoryModal';
 import DecisionReport from './components/DecisionReport';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig, PositionData } from './types';
 import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X } from 'lucide-react';
-import { DEFAULT_CONFIG, INSTRUMENT_ID, CONTRACT_VAL_ETH } from './constants';
+import { DEFAULT_CONFIG, INSTRUMENT_ID, CONTRACT_VAL_ETH, TAKER_FEE_RATE } from './constants';
 
 const App: React.FC = () => {
   const [marketData, setMarketData] = useState<MarketDataCollection | null>(null);
@@ -24,27 +24,13 @@ const App: React.FC = () => {
     const fetchStatus = async () => {
       try {
         const res = await fetch('/api/status');
-        
-        if (!res.ok) {
-           return;
-        }
-
-        const text = await res.text();
-        if (!text) return;
-
-        try {
-            const data = JSON.parse(text);
-            if (data) {
-                setMarketData(data.marketData);
-                setAccountData(data.accountData);
-                setDecision(data.latestDecision);
-                setLogs(data.logs || []);
-                setIsRunning(data.isRunning);
-                setConfig(data.config);
-            }
-        } catch (parseError) {
-            console.error("JSON Parse Error:", parseError);
-        }
+        const data = await res.json();
+        setMarketData(data.marketData);
+        setAccountData(data.accountData);
+        setDecision(data.latestDecision);
+        setLogs(data.logs);
+        setIsRunning(data.isRunning);
+        setConfig(data.config);
       } catch (e) {
         console.error("Fetch status failed", e);
       }
@@ -82,12 +68,35 @@ const App: React.FC = () => {
   };
 
   // Helper to render a single position card
-  const renderPositionCard = (pos: PositionData) => {
+  const renderPositionCard = (pos: PositionData, currentPriceStr: string) => {
     const isLong = pos.posSide === 'long';
     const upl = parseFloat(pos.upl);
     const sizeEth = (parseFloat(pos.pos) * CONTRACT_VAL_ETH).toFixed(2);
     const margin = parseFloat(pos.margin).toFixed(2);
+    const price = parseFloat(currentPriceStr || "0");
+    const avgPx = parseFloat(pos.avgPx);
     
+    // 1. Calculate Net Profit (Est. Fees: Open + Close)
+    const sizeVal = parseFloat(pos.pos) * CONTRACT_VAL_ETH;
+    const openFee = sizeVal * avgPx * TAKER_FEE_RATE;
+    const closeFee = sizeVal * price * TAKER_FEE_RATE;
+    const netPnL = upl - (openFee + closeFee);
+    
+    // 2. Robust Breakeven Display (Exchange Data -> Fallback Calc)
+    let bePxVal = parseFloat(pos.breakEvenPx || "0");
+    let isEstimated = false;
+
+    if (bePxVal <= 0 && avgPx > 0) {
+        // Fallback: Calculate Breakeven locally if exchange doesn't provide it
+        isEstimated = true;
+        if (isLong) {
+            bePxVal = avgPx * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
+        } else {
+            bePxVal = avgPx * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
+        }
+    }
+    const bePxStr = bePxVal > 0 ? bePxVal.toFixed(2) : '--';
+
     return (
       <div key={pos.instId + pos.posSide} className="bg-[#121214] border border-okx-border rounded-lg p-4 shadow-sm hover:border-okx-primary/50 transition-colors">
         {/* Header */}
@@ -105,7 +114,9 @@ const App: React.FC = () => {
         </div>
 
         {/* Grid Stats */}
-        <div className="grid grid-cols-2 gap-y-4 gap-x-6 text-xs">
+        <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-xs">
+           
+           {/* Row 1: Size & Margin */}
            <div className="space-y-1">
               <div className="text-okx-subtext flex items-center gap-1">
                  <Layers size={10} /> 持仓规模
@@ -114,7 +125,6 @@ const App: React.FC = () => {
                  {pos.pos} 张 <span className="text-gray-500">({sizeEth} ETH)</span>
               </div>
            </div>
-
            <div className="space-y-1 text-right">
               <div className="text-okx-subtext flex items-center justify-end gap-1">
                  <DollarSign size={10} /> 保证金 (Margin)
@@ -122,20 +132,37 @@ const App: React.FC = () => {
               <div className="text-gray-200 font-mono">{margin} U</div>
            </div>
 
+           {/* Row 2: Avg & Last Price */}
            <div className="space-y-1">
               <div className="text-okx-subtext">持仓均价 (Avg)</div>
               <div className="text-white font-mono">{pos.avgPx}</div>
            </div>
-
            <div className="space-y-1 text-right">
-              <div className="text-yellow-500/90 flex items-center justify-end gap-1 font-bold">
-                 <AlertTriangle size={10} /> 盈亏平衡 (BE)
-              </div>
-              <div className="text-yellow-500 font-mono font-bold">{pos.breakEvenPx || '--'}</div>
+              <div className="text-okx-subtext text-blue-400">最新市价 (Last)</div>
+              <div className="text-blue-400 font-mono font-bold">{price.toFixed(2)}</div>
            </div>
 
-           <div className="col-span-2 h-px bg-gray-800/50"></div>
+           {/* Row 3: BE & Net Profit */}
+           <div className="space-y-1">
+              <div className="text-yellow-500/90 flex items-center gap-1 font-bold" title={isEstimated ? "本地估算值" : "交易所数据"}>
+                 <AlertTriangle size={10} /> 盈亏平衡 (BE)
+              </div>
+              <div className="text-yellow-500 font-mono font-bold">
+                  {bePxStr} {isEstimated && <span className="text-[9px] font-normal opacity-70">*</span>}
+              </div>
+           </div>
+           <div className="space-y-1 text-right">
+              <div className="text-okx-subtext flex items-center justify-end gap-1 font-bold">
+                 <TrendingUp size={10} /> 净利润 (Net)
+              </div>
+              <div className={`font-mono font-bold ${netPnL >= 0 ? 'text-okx-up' : 'text-okx-down'}`}>
+                 {netPnL > 0 ? '+' : ''}{netPnL.toFixed(2)} U
+              </div>
+           </div>
 
+           <div className="col-span-2 h-px bg-gray-800/50 my-1"></div>
+
+           {/* Row 4: SL & TP */}
            <div className="space-y-1">
               <div className="text-okx-subtext flex items-center gap-1">
                  <ShieldCheck size={10} /> 止损触发 (SL)
@@ -210,14 +237,14 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content (Responsive Layout) */}
-      <main className="flex-1 overflow-y-auto lg:overflow-hidden p-4">
-        <div className="max-w-[1920px] mx-auto w-full lg:h-full h-auto grid grid-cols-1 lg:grid-cols-12 gap-4">
+      {/* Main Content (Fixed Layout) */}
+      <main className="flex-1 overflow-hidden p-4">
+        <div className="max-w-[1920px] mx-auto w-full h-full grid grid-cols-1 lg:grid-cols-12 gap-4">
         
           {/* Left Col: Chart (60%) & Logs (40%) */}
-          <div className="lg:col-span-8 flex flex-col gap-4 lg:h-full h-auto min-h-0">
+          <div className="lg:col-span-8 flex flex-col gap-4 h-full min-h-0">
             {/* Chart Area */}
-            <div className="lg:h-[60%] h-[400px] bg-okx-card rounded-xl border border-okx-border overflow-hidden relative group shadow-lg shrink-0">
+            <div className="h-[60%] bg-okx-card rounded-xl border border-okx-border overflow-hidden relative group shadow-lg shrink-0">
                {marketData?.candles15m && marketData.candles15m.length > 0 ? (
                   <CandleChart data={marketData.candles15m} />
                ) : (
@@ -238,7 +265,7 @@ const App: React.FC = () => {
             </div>
 
             {/* Logs Area - Fixed Height (Remaining) */}
-            <div className="lg:h-[40%] h-[300px] bg-okx-card rounded-xl border border-okx-border flex flex-col shadow-lg overflow-hidden shrink-0">
+            <div className="h-[40%] bg-okx-card rounded-xl border border-okx-border flex flex-col shadow-lg overflow-hidden shrink-0">
               <div className="px-4 py-2 border-b border-okx-border bg-okx-bg/50 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2">
                   <Terminal size={14} className="text-okx-primary" />
@@ -267,10 +294,10 @@ const App: React.FC = () => {
           </div>
 
           {/* Right Col: Positions (Flex) & AI Summary (Fixed Bottom) */}
-          <div className="lg:col-span-4 flex flex-col gap-4 lg:h-full h-auto min-h-0">
+          <div className="lg:col-span-4 flex flex-col gap-4 h-full min-h-0">
              
               {/* 1. Multi-Position Dashboard (Flex Grow) */}
-              <div className="lg:flex-1 h-[400px] bg-okx-card rounded-xl border border-okx-border shadow-lg overflow-hidden flex flex-col min-h-0">
+              <div className="flex-1 bg-okx-card rounded-xl border border-okx-border shadow-lg overflow-hidden flex flex-col min-h-0">
                   <div className="px-4 py-3 border-b border-okx-border bg-okx-bg/30 flex justify-between items-center shrink-0">
                       <div className="flex items-center gap-2 font-bold text-white text-sm">
                           <Wallet size={16} className="text-blue-500"/>
@@ -280,7 +307,7 @@ const App: React.FC = () => {
                   
                   <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
                      {accountData && accountData.positions.length > 0 ? (
-                         accountData.positions.map(p => renderPositionCard(p))
+                         accountData.positions.map(p => renderPositionCard(p, marketData?.ticker?.last || "0"))
                      ) : (
                          <div className="h-full flex flex-col items-center justify-center text-okx-subtext opacity-40 gap-2">
                              <Wallet size={32} />
@@ -393,7 +420,7 @@ const App: React.FC = () => {
                           <X size={24} />
                       </button>
                   </div>
-                  <div className="flex-1 overflow-hidden p-0 min-h-0">
+                  <div className="flex-1 overflow-hidden p-0">
                       <DecisionReport decision={decision} />
                   </div>
               </div>
