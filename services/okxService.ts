@@ -332,63 +332,66 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
     }
 
     try {
-        // 1. Fetch existing algo orders
+        // 1. Fetch existing algo orders (Pre-fetch to know what to cancel later)
         const pendingAlgos = await fetchAlgoOrders(config);
         
-        // 2. Cancel existing SL/TP orders for this instrument/posSide
         const toCancel = pendingAlgos
             .filter((o: any) => o.instId === instId && o.posSide === posSide)
             .map((o: any) => ({ algoId: o.algoId, instId }));
 
+        // 2. Place new Algo Order (Conditional Close) FIRST
+        // If placing fails, we throw and DO NOT cancel old orders (safeguard)
+        if (slPrice || tpPrice) {
+            const path = "/api/v5/trade/order-algo";
+            
+            if (slPrice) {
+                const slBody = JSON.stringify({
+                    instId,
+                    posSide,
+                    tdMode: 'isolated',
+                    side: posSide === 'long' ? 'sell' : 'buy', // Close Long = Sell
+                    ordType: 'conditional',
+                    sz: size, 
+                    reduceOnly: true,
+                    slTriggerPx: slPrice,
+                    slOrdPx: '-1' // Market Close
+                });
+                const slHeaders = getHeaders('POST', path, slBody, config);
+                const slRes = await fetch(BASE_URL + path, { method: 'POST', headers: slHeaders, body: slBody });
+                const slJson = await slRes.json();
+                if (slJson.code !== '0') throw new Error(`设置新止损失败: ${slJson.msg}`);
+            }
+
+            if (tpPrice) {
+                 const tpBody = JSON.stringify({
+                    instId,
+                    posSide,
+                    tdMode: 'isolated',
+                    side: posSide === 'long' ? 'sell' : 'buy',
+                    ordType: 'conditional',
+                    sz: size,
+                    reduceOnly: true,
+                    tpTriggerPx: tpPrice,
+                    tpOrdPx: '-1'
+                });
+                const tpHeaders = getHeaders('POST', path, tpBody, config);
+                const tpRes = await fetch(BASE_URL + path, { method: 'POST', headers: tpHeaders, body: tpBody });
+                const tpJson = await tpRes.json();
+                if (tpJson.code !== '0') throw new Error(`设置新止盈失败: ${tpJson.msg}`);
+            }
+        } else {
+             // If no new prices provided, we might be clearing them.
+             // If toCancel has items, we proceed to cancel below.
+             if (toCancel.length === 0) return { code: "0", msg: "无新的止盈止损价格" };
+        }
+
+        // 3. Cancel existing SL/TP orders ONLY after new ones are successfully placed (or if we are just clearing)
         if (toCancel.length > 0) {
             const cancelPath = "/api/v5/trade/cancel-algos";
             const cancelBody = JSON.stringify(toCancel);
             const headers = getHeaders('POST', cancelPath, cancelBody, config);
             await fetch(BASE_URL + cancelPath, { method: 'POST', headers: headers, body: cancelBody });
-            console.log(`Cancelled ${toCancel.length} old algo orders.`);
-        }
-
-        // 3. Place new Algo Order (Conditional Close)
-        if (!slPrice && !tpPrice) return { code: "0", msg: "无新的止盈止损价格" };
-
-        const path = "/api/v5/trade/order-algo";
-        // NOTE: ordType must be 'conditional' for separate SL/TP algo orders.
-        // We must provide 'sz' and 'reduceOnly: true'.
-        
-        if (slPrice) {
-            const slBody = JSON.stringify({
-                instId,
-                posSide,
-                tdMode: 'isolated',
-                side: posSide === 'long' ? 'sell' : 'buy', // Close Long = Sell
-                ordType: 'conditional',
-                sz: size, 
-                reduceOnly: true,
-                slTriggerPx: slPrice,
-                slOrdPx: '-1' // Market Close
-            });
-            const slHeaders = getHeaders('POST', path, slBody, config);
-            const slRes = await fetch(BASE_URL + path, { method: 'POST', headers: slHeaders, body: slBody });
-            const slJson = await slRes.json();
-            if (slJson.code !== '0') throw new Error(`设置止损失败: ${slJson.msg}`);
-        }
-
-        if (tpPrice) {
-             const tpBody = JSON.stringify({
-                instId,
-                posSide,
-                tdMode: 'isolated',
-                side: posSide === 'long' ? 'sell' : 'buy',
-                ordType: 'conditional',
-                sz: size,
-                reduceOnly: true,
-                tpTriggerPx: tpPrice,
-                tpOrdPx: '-1'
-            });
-            const tpHeaders = getHeaders('POST', path, tpBody, config);
-            const tpRes = await fetch(BASE_URL + path, { method: 'POST', headers: tpHeaders, body: tpBody });
-            const tpJson = await tpRes.json();
-            if (tpJson.code !== '0') throw new Error(`设置止盈失败: ${tpJson.msg}`);
+            console.log(`Cancelled ${toCancel.length} old algo orders after placing new ones.`);
         }
 
         return { code: "0", msg: "止盈止损更新成功" };
