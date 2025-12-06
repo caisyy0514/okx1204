@@ -1,4 +1,3 @@
-
 import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
 import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
@@ -359,13 +358,14 @@ ${positionContext}
 
 **核心决策九大军规 (The 9 Commandments)**:
 
-1. **本金保护 (Capital Protection)**:
-   - 使用 **棘轮机制 (Ratchet)** 移动止损：止损价 **只能向利润更高的方向移动**，严禁回调。
-   - 如 Long: New SL >= Old SL。如 Short: New SL <= Old SL。
+1. **本金保护与耐心 (Ratchet & Patience)**:
+   - 使用 **棘轮机制** 移动止损：止损价严禁回撤。
+   - **关键调整**：在【净利润 < 0】的亏损/回本途中，**严禁激进上调止损**。
+   - 除非出现极强的结构性支撑，否则不要因为微小的价格反弹就紧跟移动止损，这会导致在达到盈亏平衡前被市场噪音震荡出局。
 
 2. **锁定利润 (Lock-in Profit)**:
-   - 当【净利润 (Net PnL) > 0】且价格脱离成本区时，必须将 SL 移动到 **Breakeven Price** 之上。
-   - 这是优先级最高的任务：先保证不亏，再追求盈利。
+   - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区后，才迅速将 SL 移动到 **Breakeven Price** 之上。
+   - 此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动。
 
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
@@ -384,13 +384,13 @@ ${positionContext}
 6. **核心目标**:
    - 一切决策以 **净利润 (Net Profit)** 为核心。净利润 = 浮盈 - 双边手续费。
 
-7. **波动容忍 (Volatility Filter)**:
-   - 在寻找调整 SL 时机时（尤其是浮亏阶段），允许一定程度的 "呼吸空间" (Technical Stop)，以免被微小噪音扫损。
-   - 但一旦进入盈利区，容忍度应迅速收紧。
+7. **盈亏平衡前的呼吸空间 (Pre-Breakeven Buffer)**:
+   - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
+   - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动。
 
 8. **锚点战术 (Anchor Point)**:
    - 交易所的 **Breakeven Price** 是最重要的战场分界线。
-   - 你的首要战术动作：确保 SL 尽快跨越 Breakeven 线。
+   - 你的战术路径：忍受波动 -> 触达 Breakeven -> 迅速将 SL 移至 Breakeven 之上 -> 开启无限追利模式。
 
 9. **AI 动态风控**:
    - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏，最大化捕捉利润。
