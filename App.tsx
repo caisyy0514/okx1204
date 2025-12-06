@@ -205,7 +205,7 @@ const App: React.FC = () => {
               onClick={() => setIsSettingsOpen(true)}
               className="p-2 hover:bg-okx-border rounded-lg text-okx-subtext hover:text-white transition-colors"
             >
-              <设置size={20} />
+              <Settings size={20} />
             </button>
           </div>
         </div>
