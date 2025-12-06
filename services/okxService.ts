@@ -36,25 +36,34 @@ const getHeaders = (method: string, requestPath: string, body: string = '', conf
   };
 };
 
+const getPublicHeaders = () => {
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+};
+
 export const fetchMarketData = async (config: any): Promise<MarketDataCollection> => {
   if (config.isSimulation) {
     return generateMockMarketData();
   }
 
   try {
-    const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${INSTRUMENT_ID}`);
+    const publicHeaders = getPublicHeaders();
+
+    const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${INSTRUMENT_ID}`, { headers: publicHeaders });
     const tickerJson = await tickerRes.json();
     
-    const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=5m&limit=50`);
+    const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=5m&limit=50`, { headers: publicHeaders });
     const candles5mJson = await candles5mRes.json();
     
-    const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=15m&limit=100`);
+    const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=15m&limit=100`, { headers: publicHeaders });
     const candles15mJson = await candles15mRes.json();
 
-    const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${INSTRUMENT_ID}`);
+    const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${INSTRUMENT_ID}`, { headers: publicHeaders });
     const fundingJson = await fundingRes.json();
     
-    const oiRes = await fetch(`${BASE_URL}/api/v5/public/open-interest?instId=${INSTRUMENT_ID}`);
+    const oiRes = await fetch(`${BASE_URL}/api/v5/public/open-interest?instId=${INSTRUMENT_ID}`, { headers: publicHeaders });
     const oiJson = await oiRes.json();
 
     if (tickerJson.code !== '0') throw new Error(`OKX API Error (Ticker): ${tickerJson.msg}`);
@@ -63,8 +72,8 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
       ticker: tickerJson.data[0],
       candles5m: formatCandles(candles5mJson.data),
       candles15m: formatCandles(candles15mJson.data),
-      fundingRate: fundingJson.data[0]?.fundingRate || "0",
-      openInterest: oiJson.data[0]?.oi || "0",
+      fundingRate: fundingJson.data?.[0]?.fundingRate || "0",
+      openInterest: oiJson.data?.[0]?.oi || "0",
       orderbook: {}, 
       trades: [],
     };
@@ -120,7 +129,7 @@ export const fetchAccountData = async (config: any): Promise<AccountContext> => 
                 posSide: rawPos.posSide,
                 pos: rawPos.pos,
                 avgPx: rawPos.avgPx,
-                breakEvenPx: rawPos.breakEvenPx, // Map Break Even Price from API
+                breakEvenPx: rawPos.breakEvenPx, // NEW field
                 upl: rawPos.upl,
                 uplRatio: rawPos.uplRatio,
                 mgnMode: rawPos.mgnMode,
@@ -129,7 +138,6 @@ export const fetchAccountData = async (config: any): Promise<AccountContext> => 
                 cTime: rawPos.cTime
             };
             
-             // Find SL/TP orders specific to this position side
              if (algoOrders.length > 0) {
                  const slOrder = algoOrders.find((o: any) => o.instId === rawPos.instId && o.posSide === rawPos.posSide && o.slTriggerPx && parseFloat(o.slTriggerPx) > 0);
                  const tpOrder = algoOrders.find((o: any) => o.instId === rawPos.instId && o.posSide === rawPos.posSide && o.tpTriggerPx && parseFloat(o.tpTriggerPx) > 0);
@@ -212,27 +220,16 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
 
     if (order.action === 'CLOSE') {
         const closePath = "/api/v5/trade/close-position";
-        
-        const closeLongBody = JSON.stringify({
-            instId: INSTRUMENT_ID,
-            posSide: 'long', 
-            mgnMode: 'isolated'
-        });
+        const closeLongBody = JSON.stringify({ instId: INSTRUMENT_ID, posSide: 'long', mgnMode: 'isolated' });
         const headersLong = getHeaders('POST', closePath, closeLongBody, config);
         const resLong = await fetch(BASE_URL + closePath, { method: 'POST', headers: headersLong, body: closeLongBody });
         const jsonLong = await resLong.json();
-        
         if (jsonLong.code === '0') return jsonLong; 
         
-        const closeShortBody = JSON.stringify({ 
-            instId: INSTRUMENT_ID, 
-            posSide: 'short', 
-            mgnMode: 'isolated' 
-        });
+        const closeShortBody = JSON.stringify({ instId: INSTRUMENT_ID, posSide: 'short', mgnMode: 'isolated' });
         const headersShort = getHeaders('POST', closePath, closeShortBody, config);
         const resShort = await fetch(BASE_URL + closePath, { method: 'POST', headers: headersShort, body: closeShortBody });
         const jsonShort = await resShort.json();
-
         if (jsonShort.code === '0') return jsonShort;
 
         const longMsg = jsonLong.code === '51000' || jsonLong.msg.includes('不存在') ? '多单不存在' : jsonLong.msg;
@@ -320,9 +317,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
 
         const pendingAlgos = await fetchAlgoOrders(config);
         
-        // ----------------------------------------
         // Step 1: Place NEW Algo Orders First
-        // ----------------------------------------
         const path = "/api/v5/trade/order-algo";
         let slSuccess = false;
         let tpSuccess = false;
@@ -375,21 +370,17 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
             }
         }
 
-        // ----------------------------------------
         // Step 2: Cancel OLD Algo Orders Only After Success
-        // ----------------------------------------
         const ordersToCancel: any[] = [];
         
         const isSL = (o: any) => o.slTriggerPx && parseFloat(o.slTriggerPx) > 0;
         const isTP = (o: any) => o.tpTriggerPx && parseFloat(o.tpTriggerPx) > 0;
 
-        // If we successfully placed a new SL, cancel ALL old SLs for this position
         if (slSuccess || (finalSl && slSuccess)) { 
             const oldSls = pendingAlgos.filter((o: any) => o.instId === instId && o.posSide === posSide && isSL(o));
             ordersToCancel.push(...oldSls.map(o => ({ algoId: o.algoId, instId })));
         }
 
-        // If we successfully placed a new TP, cancel ALL old TPs for this position
         if (tpSuccess || (finalTp && tpSuccess)) {
             const oldTps = pendingAlgos.filter((o: any) => o.instId === instId && o.posSide === posSide && isTP(o));
             ordersToCancel.push(...oldTps.map(o => ({ algoId: o.algoId, instId })));
