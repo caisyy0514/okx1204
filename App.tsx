@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Settings, Play, Pause, RefreshCw, Activity, Zap, TrendingUp, AlertCircle, Terminal, Shield, Target, Brain, X, Eye, Flame, Cloud } from 'lucide-react';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig } from './types';
@@ -116,7 +115,7 @@ const App: React.FC = () => {
           </button>
           
           <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-okx-subtext hover:text-white">
-            <设置size={20} />
+            <Settings size={20} />
           </button>
         </div>
       </header>
