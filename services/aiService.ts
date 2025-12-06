@@ -168,6 +168,30 @@ export const testConnection = async (apiKey: string): Promise<string> => {
   }
 };
 
+// --- News Fetcher (Internet Search Capability) ---
+const fetchRealTimeNews = async (): Promise<string> => {
+    try {
+        // Fetch Top latest crypto news (Public API)
+        const url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=6";
+        const res = await fetch(url);
+        if (!res.ok) return "暂无法连接互联网新闻源";
+        
+        const json = await res.json();
+        if (json.Data && Array.isArray(json.Data)) {
+            // Format: Title + Source
+            const items = json.Data.slice(0, 6).map((item: any) => {
+                const time = new Date(item.published_on * 1000).toLocaleTimeString();
+                return `- [${time}] ${item.title} (Source: ${item.source_info?.name || 'Web'})`;
+            });
+            return items.join("\n");
+        }
+        return "扫描未发现即时重大新闻";
+    } catch (e) {
+        // Fail gracefully to keep trading logic running
+        return "实时搜索暂时不可用 (API Connection Error)";
+    }
+};
+
 // --- Main Decision Function ---
 
 export const getTradingDecision = async (
@@ -280,7 +304,10 @@ export const getTradingDecision = async (
       `;
   }
 
-  // --- 4. 构建 Prompt (Refined 9 Rules) ---
+  // --- NEW: Perform "Internet Search" (Fetch Real-time News) ---
+  const newsContext = await fetchRealTimeNews();
+
+  // --- 4. 构建 Prompt (Refined 9 Rules + Internet Search) ---
   
   const marketDataBlock = `
 价格: ${currentPrice.toFixed(2)}
@@ -294,17 +321,21 @@ KDJ: ${kdjSignalStr}
   const systemPrompt = `
 你是一名精通 **ETH 合约交易** 专家。
 你的首要任务是执行 **保护本金的情况下最大化盈利** 。
+你具备 **实时联网搜索能力**，必须结合下方的【实时互联网情报】进行综合研判。
 
 **当前环境**:
 - 阶段: ${stageName} (杠杆 ${currentStageParams.leverage}x)
 - 市场: ${marketDataBlock}
+
+**实时互联网情报 (Real-time Internet Search)**:
+${newsContext}
 
 **持仓状态**:
 ${positionContext}
 
 ---
 
-**核心决策十大军规 (The 10 Commandments)**:
+**核心决策九大军规 (The 9 Commandments)**:
 
 1. **本金保护 (Capital Protection)**:
    - 使用 **棘轮机制 (Ratchet)** 移动止损：止损价 **只能向利润更高的方向移动**，严禁回调。
@@ -340,11 +371,7 @@ ${positionContext}
    - 你的首要战术动作：确保 SL 尽快跨越 Breakeven 线。
 
 9. **AI 动态风控**:
-   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据市场热点、技术指标全权接管 SL 的移动节奏，最大化捕捉利润。
-   
-10. **实时联网搜索 (ONLINE SEARCH)**:
-   - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
-   - **判断**: 根据热点事件给出决策建议。
+   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏，最大化捕捉利润。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -358,7 +385,7 @@ ${positionContext}
   const responseSchema = `
   {
     "stage_analysis": "简述...",
-    "hot_events_overview": "...",
+    "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
     "market_assessment": "...",
     "eth_analysis": "...", 
     "trading_decision": {
@@ -370,14 +397,14 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？新闻是否影响策略？"
   }
   `;
 
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY:\n" + responseSchema },
-        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据九大军规给出最佳操作。` }
+        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据九大军规及实时情报给出最佳操作。` }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
