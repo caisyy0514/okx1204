@@ -1,5 +1,6 @@
+
 import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
-import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID } from "../constants";
+import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
 // --- Technical Indicator Helpers ---
 
@@ -68,6 +69,7 @@ const calcMACD = (prices: number[]) => {
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
   // Calculate EMA12 and EMA26 arrays to get MACD line array
+  // Simplified: Just calculating the *latest* values for prompt
   const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
   const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
   
@@ -93,6 +95,7 @@ const calcKDJ = (highs: number[], lows: number[], closes: number[], period: numb
     let k = 50, d = 50, j = 50;
     
     // We iterate through the data to smooth K and D
+    // Starting from index 'period'
     for (let i = 0; i < closes.length; i++) {
         if (i < period - 1) continue;
         
@@ -119,6 +122,7 @@ const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
 const callDeepSeek = async (apiKey: string, messages: any[]) => {
     const cleanKey = apiKey ? apiKey.trim() : "";
     if (!cleanKey) throw new Error("API Key 为空");
+    // eslint-disable-next-line no-control-regex
     if (/[^\x00-\x7F]/.test(cleanKey)) {
         throw new Error("API Key 包含非法字符(中文或特殊符号)");
     }
@@ -189,14 +193,9 @@ export const getTradingDecision = async (
   const volumes = candles.map(c => parseFloat(c.vol));
 
   // --- 2. 指标计算 (Indicators) ---
-  
   const dailyChange = open24h > 0 ? ((currentPrice - open24h) / open24h) * 100 : 0;
-  const volWanShou = vol24h / 10000; 
-  const oiValue = openInterest * CONTRACT_VAL_ETH * currentPrice;
-  const turnoverRate = oiValue > 0 ? (vol24h / oiValue) * 100 : 0;
-
-  // 趋势
-  const ema20 = calcEMA(closes, 20);
+  
+  // Trend & Momentum
   const macdData = calcMACD(closes);
   const macdSignalStr = macdData.hist > 0 ? "多头趋势 (MACD > Signal)" : "空头趋势 (MACD < Signal)";
   
@@ -207,22 +206,15 @@ export const getTradingDecision = async (
   else if (currentPrice > boll.mid) bollPosStr = "中轨上方 (偏多)";
   else bollPosStr = "中轨下方 (偏空)";
 
-  // 振荡
   const rsi14 = calcRSI(closes, 14);
   const kdj = calcKDJ(highs, lows, closes, 9);
   let kdjSignalStr = "观望";
-  if (kdj.k > 80) kdjSignalStr = "超买 (死叉预警)";
-  else if (kdj.k < 20) kdjSignalStr = "超卖 (金叉预警)";
+  if (kdj.k > 80 && kdj.d > 80) kdjSignalStr = "超买 (死叉预警)";
+  else if (kdj.k < 20 && kdj.d < 20) kdjSignalStr = "超卖 (金叉预警)";
   else if (kdj.k > kdj.d) kdjSignalStr = "金叉向上";
   else kdjSignalStr = "死叉向下";
 
-  // 量能
-  const vma5 = calcSMA(volumes, 5);
-  const vma10 = calcSMA(volumes, 10);
-  const volRatio = vma5 > 0 ? volumes[volumes.length - 1] / vma5 : 1;
-  const volRatioStr = volRatio.toFixed(2);
-
- // --- 3. 核心：持仓分析与利润保护计算 (Advanced Position Analysis) ---
+  // --- 3. 核心：持仓分析与利润保护计算 (Advanced Position Analysis) ---
   const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
   
   let stageName = "";
@@ -243,58 +235,52 @@ export const getTradingDecision = async (
   let positionContext = "当前无持仓";
   let breakevenPrice = 0;
   let netPnL = 0;
-  let feeEstimated = 0;
-  let posDetails = {};
+  let estimatedTotalFees = 0;
   
   if (hasPosition) {
       const p = primaryPosition!;
-      const sizeEth = parseFloat(p.pos) * CONTRACT_VAL_ETH;
+      const sizeContracts = parseFloat(p.pos);
+      const sizeCoin = sizeContracts * CONTRACT_VAL_ETH;
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
       
-      // Calculate Fees: Opening Fee (paid) + Closing Fee (Estimated)
-      // Approx: Size * Price * FeeRate * 2
-      feeEstimated = sizeEth * entryPrice * TAKER_FEE_RATE + sizeEth * currentPrice * TAKER_FEE_RATE;
-      
-      // Net Profit = Floating PnL - Fees
-      netPnL = upl - feeEstimated;
-
-      // Breakeven Calculation
-      // Long: Entry * (1 + 2 * FeeRate)
-      // Short: Entry * (1 - 2 * FeeRate)
+      // Strict Breakeven Calculation (Considering Opening + Closing Fees)
+      // Formula: Breakeven = Entry * (1 + Fee) / (1 - Fee) for Long
+      // Formula: Breakeven = Entry * (1 - Fee) / (1 + Fee) for Short
       if (p.posSide === 'long') {
-          breakevenPrice = entryPrice * (1 + 2 * TAKER_FEE_RATE);
+          breakevenPrice = entryPrice * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
       } else {
-          breakevenPrice = entryPrice * (1 - 2 * TAKER_FEE_RATE);
+          breakevenPrice = entryPrice * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
       }
+      
+      // Calculate Real Net PnL (Floating PnL - Estimated Closing Fee - Estimated Opening Fee)
+      // Note: UPL from exchange usually excludes fees. We must ensure we cover costs.
+      const currentVal = sizeCoin * currentPrice;
+      const entryVal = sizeCoin * entryPrice;
+      estimatedTotalFees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
+      
+      netPnL = upl - estimatedTotalFees;
 
       positionContext = `
+      === 持仓详情 ===
       方向: ${p.posSide.toUpperCase()}
-      持仓量: ${p.pos} 张
+      持仓量: ${p.pos} 张 (${sizeCoin.toFixed(2)} ETH)
       开仓均价: ${entryPrice.toFixed(2)}
       当前市价: ${currentPrice.toFixed(2)}
       
-      【盈亏分析】:
+      === 盈亏分析 (Net Profit) ===
       浮动盈亏 (UPL): ${upl.toFixed(2)} U
-      预估双边手续费: ${feeEstimated.toFixed(2)} U
-      净利润 (Net PnL): ${netPnL.toFixed(2)} U
+      预估双边手续费: ${estimatedTotalFees.toFixed(2)} U
+      【净利润】: ${netPnL.toFixed(2)} U  <-- 决策核心依据
       
-      【核心锚点】:
-      保本价格 (Breakeven): ${breakevenPrice.toFixed(2)} (必须守住此线!)
-      当前止损 (Current SL): ${p.slTriggerPx || "未设置"}
-      当前止盈 (Current TP): ${p.tpTriggerPx || "未设置"}
+      === 保护锚点 ===
+      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)} (含手续费)
+      当前止损 (SL): ${p.slTriggerPx || "未设置"}
+      当前止盈 (TP): ${p.tpTriggerPx || "未设置 (建议不设，用移动止损)"}
       `;
-      
-      posDetails = {
-          side: p.posSide,
-          entry: entryPrice,
-          breakeven: breakevenPrice,
-          currentSL: parseFloat(p.slTriggerPx || "0"),
-          netPnL: netPnL
-      };
   }
 
-  // --- 4. 构建 Prompt (Rich Format with 9 Rules) ---
+  // --- 4. 构建 Prompt (Refined 9 Rules) ---
   
   const marketDataBlock = `
 价格: ${currentPrice.toFixed(2)}
@@ -302,87 +288,96 @@ export const getTradingDecision = async (
 MACD: ${macdSignalStr}
 RSI: ${rsi14.toFixed(2)}
 KDJ: ${kdjSignalStr}
-布林: ${bollPosStr} (Up:${boll.upper.toFixed(2)}, Mid:${boll.mid.toFixed(2)}, Low:${boll.lower.toFixed(2)})
+布林: ${bollPosStr}
 `;
 
   const systemPrompt = `
-你是一名精通 **ETH 合约移动止盈止损策略** 的风控专家。
-你的核心目标是 **净利润最大化** (Net Profit Maximization)。
+你是一名精通 **ETH 合约交易** 专家。
+你的首要任务是执行 **保护本金的情况下最大化盈利** 。
 
 **当前环境**:
 - 阶段: ${stageName} (杠杆 ${currentStageParams.leverage}x)
-- 可用余额: ${availableEquity.toFixed(2)} U
-- 市场状态: ${marketDataBlock}
+- 市场: ${marketDataBlock}
 
 **持仓状态**:
 ${positionContext}
 
 ---
 
-**核心策略规则 (Strict Rules)**:
+**核心决策十大军规 (The 10 Commandments)**:
 
-1. **移动止损 (Ratchet Mechanism)**:
-   - 止损价 (SL) 采用棘轮机制：**只向利润更高的方向移动**。
-   - 如果当前持仓是 LONG，新 SL 必须 >= 旧 SL (除非旧 SL 为 0)。严禁降低 SL 导致利润回吐。
-   - 如果当前持仓是 SHORT，新 SL 必须 <= 旧 SL (除非旧 SL 为 0)。
+1. **本金保护 (Capital Protection)**:
+   - 使用 **棘轮机制 (Ratchet)** 移动止损：止损价 **只能向利润更高的方向移动**，严禁回调。
+   - 如 Long: New SL >= Old SL。如 Short: New SL <= Old SL。
 
-2. **保本锚点 (Breakeven Anchor - PRIORITY #1)**:
-   - 如果当前价格已明显脱离成本区 (例如 Long 时 Price > Breakeven + 0.3%)，且当前 SL 仍处于亏损区：
-   - **必须** 将 SL 移动到 **Breakeven Price** (保本价) 之上。这是首要任务！
+2. **锁定利润 (Lock-in Profit)**:
+   - 当【净利润 (Net PnL) > 0】且价格脱离成本区时，必须将 SL 移动到 **Breakeven Price** 之上。
+   - 这是优先级最高的任务：先保证不亏，再追求盈利。
 
-3. **趋势探索 (Trailing Take Profit)**:
-   - 不要设置固定的止盈价 (TP) 限制上涨空间，除非遇到强阻力位。
-   - 使用移动 SL 来跟随趋势，尽可能吃完整个波段。
+3. **趋势上限探索 (Trend Exploration)**:
+   - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
+   - 使用 **移动止损 (Trailing SL)** 来跟随趋势，让利润奔跑，直到趋势反转触碰 SL 离场。
 
-4. **补仓机制 (DCA - Cost Averaging)**:
-   - 仅在 **风险可控** (仓位轻、有支撑位) 且 **逻辑未破坏** (只是短期波动) 时允许补仓摊低成本。
-   - 如果判定为趋势反转，严禁补仓，必须止损。
+4. **补仓机制 (Smart DCA)**:
+   - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
+   - 目的：摊低成本 (Average Down)。
+   - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
 
 5. **金字塔加仓 (Pyramiding)**:
-   - 当 **净利润 > 0** 且趋势强劲 (MACD张口扩大、突破新高) 时，允许加仓 (Buy/Sell) 以放大收益。
+   - 触发条件：【净利润 > 0】 + 趋势确认突破 + 风险可控。
+   - 目的：捕捉本次交易的最大收益。
+   - 原则：加仓部分应小于底仓 (倒金字塔是找死)。
 
-6. **净利润计算**:
-   - 决策必须基于 **Net PnL** (扣除手续费后的利润)。不要被未扣费的 UPL 误导。
+6. **核心目标**:
+   - 一切决策以 **净利润 (Net Profit)** 为核心。净利润 = 浮盈 - 双边手续费。
 
-7. **容忍度 (Volatility Filter)**:
-   - 在寻找调整 SL 时机时，允许一定程度的浮动亏损（Technical Stop），以免被微小噪音扫出局。
-   - 但一旦进入盈利区，容忍度应迅速降低，转为利润保护模式。
+7. **波动容忍 (Volatility Filter)**:
+   - 在寻找调整 SL 时机时（尤其是浮亏阶段），允许一定程度的 "呼吸空间" (Technical Stop)，以免被微小噪音扫损。
+   - 但一旦进入盈利区，容忍度应迅速收紧。
 
-**输出指令 (Action Guide)**:
-- **UPDATE_TPSL**: 仅调整 SL/TP，不增减仓位。用于保护利润或设置初始止损。
-- **BUY / SELL**: 
-   - 如已有持仓且方向相同 -> 代表 **加仓/补仓** (DCA or Pyramid)。
-   - 如无持仓 -> 代表 **开仓**。
-- **CLOSE**: 清仓止盈或止损。
-- **HOLD**: 维持现状。
+8. **锚点战术 (Anchor Point)**:
+   - 交易所的 **Breakeven Price** 是最重要的战场分界线。
+   - 你的首要战术动作：确保 SL 尽快跨越 Breakeven 线。
 
-请根据以上规则，结合技术指标，生成 JSON 决策。
-如果建议 UPDATE_TPSL，必须给出具体的 stop_loss 价格。
+9. **AI 动态风控**:
+   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据市场热点、技术指标全权接管 SL 的移动节奏，最大化捕捉利润。
+   
+10. **实时联网搜索 (ONLINE SEARCH)**:
+   - **指令**: 立即搜索全网 Crypto 热点 (6h/24h)。
+   - **判断**: 根据热点事件给出决策建议。
+
+**操作指令**:
+- **UPDATE_TPSL**: 调整止损止盈 (最常用)。
+- **BUY / SELL**: 开仓或加仓/补仓。
+- **CLOSE**: 立即市价全平。
+- **HOLD**: 暂时不动。
+
+请输出 JSON 决策。如果建议 UPDATE_TPSL，必须给出明确的 \`stop_loss\` 数值。
 `;
 
   const responseSchema = `
   {
-    "stage_analysis": "简述资金与阶段...",
+    "stage_analysis": "简述...",
     "hot_events_overview": "...",
     "market_assessment": "...",
     "eth_analysis": "...", 
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
       "confidence": "0-100%",
-      "position_size": "如加仓填具体数量(张)，如仅调SL填0",
+      "position_size": "数量(张), 仅在BUY/SELL时有效",
       "leverage": "${currentStageParams.leverage}",
-      "profit_target": "建议的硬止盈(可选，一般留空靠移动止损)",
-      "stop_loss": "严格计算后的止损价",
+      "profit_target": "建议留空或设极高",
+      "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "详细说明：是否触发保本？是否触发棘轮移动？计算净利润了吗？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？"
   }
   `;
 
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY:\n" + responseSchema },
-        { role: "user", content: `基于上述规则 (Net PnL: ${netPnL.toFixed(2)} U)，给出最佳操作。` }
+        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据九大军规给出最佳操作。` }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
@@ -393,87 +388,56 @@ ${positionContext}
         const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         decision = JSON.parse(cleanText);
     } catch (e) {
-        console.error("JSON Parse Failed:", text);
         throw new Error("AI 返回格式错误");
     }
 
     // --- Post-Processing & Safety Checks ---
     decision.action = decision.trading_decision.action.toUpperCase() as any;
     
-    // Safety Check: Ratchet Mechanism (Double Check AI Logic)
+    // Safety Check: Ratchet Mechanism Enforcement (System Override)
+    // 强制执行棘轮机制，防止 AI 幻觉导致止损变宽
     if (decision.action === 'UPDATE_TPSL' && hasPosition) {
         const p = primaryPosition!;
         const newSL = parseFloat(decision.trading_decision.stop_loss);
         const currentSL = parseFloat(p.slTriggerPx || "0");
         
-        // Skip check if no new SL provided
-        if (!isNaN(newSL) && newSL > 0) {
-            if (p.posSide === 'long' && currentSL > 0) {
+        if (!isNaN(newSL) && newSL > 0 && currentSL > 0) {
+            // Rule: Only move towards higher profit
+            if (p.posSide === 'long') {
                 if (newSL < currentSL) {
-                    console.warn(`[Risk Guard] AI 试图降低多单止损 (${currentSL} -> ${newSL})，已拦截。维持 HOLD。`);
+                    console.warn(`[Ratchet Guard] 拦截无效指令: 多单止损不能下移 (${currentSL} -> ${newSL})`);
                     decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 违反棘轮原则，禁止降低多单止损]";
+                    decision.reasoning += " [系统拦截: 违反棘轮机制，禁止降低多单止损]";
                 }
-            } else if (p.posSide === 'short' && currentSL > 0) {
+            } else if (p.posSide === 'short') {
                 if (newSL > currentSL) {
-                    console.warn(`[Risk Guard] AI 试图提高空单止损 (${currentSL} -> ${newSL})，已拦截。维持 HOLD。`);
+                    console.warn(`[Ratchet Guard] 拦截无效指令: 空单止损不能上移 (${currentSL} -> ${newSL})`);
                     decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 违反棘轮原则，禁止提高空单止损]";
+                    decision.reasoning += " [系统拦截: 违反棘轮机制，禁止提高空单止损]";
                 }
             }
         }
     }
 
-    // Standard sizing logic for OPEN/ADD positions
+    // Standard sizing logic logic...
     const leverage = parseFloat(decision.trading_decision.leverage);
-    const confidence = parseFloat(decision.trading_decision.confidence) || 50;
     const safeLeverage = isNaN(leverage) ? currentStageParams.leverage : leverage;
     
-    // Recalculate size if AI wants to BUY/SELL
+    // Auto-fix sizing for BUY/SELL
     if (decision.action === 'BUY' || decision.action === 'SELL') {
-        // If adding position (Pyramid/DCA), use conservative sizing
-        const isAdding = hasPosition;
-        const riskFactor = isAdding ? 0.2 : currentStageParams.risk_factor; // Add only small portions
+        const isAdding = hasPosition; // DCA or Pyramiding
+        const riskFactor = isAdding ? 0.3 : currentStageParams.risk_factor; // 加仓动作风险系数较低
 
-        let targetMargin = availableEquity * riskFactor * (confidence / 100);
-        const maxSafeMargin = availableEquity * 0.95; 
-        let finalMargin = Math.min(targetMargin, maxSafeMargin);
-
-        const MIN_OPEN_VALUE = 100;
-        let positionValue = finalMargin * safeLeverage;
-
-        // Auto-fix for small accounts in Stage 1
-        if (!isAdding && positionValue < MIN_OPEN_VALUE && availableEquity * 0.9 * safeLeverage > MIN_OPEN_VALUE) {
-             if (confidence >= 40) {
-                 finalMargin = MIN_OPEN_VALUE / safeLeverage;
-                 positionValue = MIN_OPEN_VALUE;
-            }
-        }
-
-        if (positionValue < MIN_OPEN_VALUE && !isAdding) {
-             // If opening new, must meet min requirement. If adding, maybe smaller is ok? 
-             // OKX min size is usually 1 contract (0.1 ETH ~ $300). 
-             // Let's stick to contract check.
-        }
-
-        const numContractsRaw = positionValue / (CONTRACT_VAL_ETH * currentPrice);
-        let numContracts = Math.floor(numContractsRaw * 100) / 100;
-        
-        // Override with AI suggestion if AI provided specific specific small size for adding
-        const aiSuggestedSize = parseFloat(decision.trading_decision.position_size);
-        if (isAdding && !isNaN(aiSuggestedSize) && aiSuggestedSize > 0) {
-            numContracts = aiSuggestedSize;
-        }
-
-        if (numContracts < 0.01) {
-            if (!hasPosition) {
-                decision.action = 'HOLD';
-                decision.size = "0";
-            }
+        if (!decision.trading_decision.position_size || decision.trading_decision.position_size === "0") {
+             const confidence = parseFloat(decision.trading_decision.confidence) || 50;
+             const marginToUse = availableEquity * riskFactor * (confidence / 100);
+             const posValue = marginToUse * safeLeverage;
+             const contracts = posValue / (CONTRACT_VAL_ETH * currentPrice);
+             decision.size = Math.max(contracts, 0.01).toFixed(2);
         } else {
-            decision.size = numContracts.toFixed(2);
-            decision.leverage = safeLeverage.toString();
+             decision.size = decision.trading_decision.position_size;
         }
+        decision.leverage = safeLeverage.toString();
     } else {
         decision.size = "0";
         decision.leverage = safeLeverage.toString();
