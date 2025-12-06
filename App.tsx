@@ -5,9 +5,8 @@ import SettingsModal from './components/SettingsModal';
 import HistoryModal from './components/HistoryModal';
 import DecisionReport from './components/DecisionReport';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig, PositionData } from './types';
-import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers } from 'lucide-react';
+import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X } from 'lucide-react';
 import { DEFAULT_CONFIG, INSTRUMENT_ID, CONTRACT_VAL_ETH } from './constants';
-import { X } from 'lucide-react';
 
 const App: React.FC = () => {
   const [marketData, setMarketData] = useState<MarketDataCollection | null>(null);
@@ -384,6 +383,7 @@ const App: React.FC = () => {
                   <div className="flex-1 overflow-hidden p-0">
                       <DecisionReport decision={decision} />
                   </div>
+              </div>
           </div>
       )}
     </div>
