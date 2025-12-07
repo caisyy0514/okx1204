@@ -117,12 +117,12 @@ const runTradingLoop = async () => {
         const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
         
         if (hasPosition) {
-            // [Holding Mode]: High Frequency (15s)
-            aiInterval = 15000; 
+            // [Holding Mode]: High Frequency (30s)
+            aiInterval = 30000; 
             modeText = "持仓高频监测";
         } else {
-            // [Empty Mode]: Low Frequency (60s)
-            aiInterval = 60000; 
+            // [Empty Mode]: Low Frequency (120s)
+            aiInterval = 120000; 
             modeText = "空仓低频扫描";
         }
     }
