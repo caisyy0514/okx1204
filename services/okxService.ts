@@ -44,6 +44,10 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
     const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=15m&limit=100`);
     const candles15mJson = await candles15mRes.json();
 
+    // NEW: Fetch 1H candles for EMA Strategy
+    const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=1H&limit=100`);
+    const candles1HJson = await candles1HRes.json();
+
     const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${INSTRUMENT_ID}`);
     const fundingJson = await fundingRes.json();
     
@@ -56,6 +60,7 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
       ticker: tickerJson.data[0],
       candles5m: formatCandles(candles5mJson.data),
       candles15m: formatCandles(candles15mJson.data),
+      candles1H: formatCandles(candles1HJson.data),
       fundingRate: fundingJson.data[0]?.fundingRate || "0",
       openInterest: oiJson.data[0]?.oi || "0",
       orderbook: {}, 
@@ -454,10 +459,14 @@ function generateMockMarketData(): MarketDataCollection {
     return candles.reverse();
   };
 
+  // Generate 1H candles for mock
+  const candles1H = generateCandles(100).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
+
   return {
     ticker: { ...MOCK_TICKER, last: currentPrice.toFixed(2), ts: now.toString() },
     candles5m: generateCandles(50),
     candles15m: generateCandles(100),
+    candles1H: candles1H,
     fundingRate: "0.0001",
     openInterest: "50000",
     orderbook: [],
