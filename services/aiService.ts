@@ -397,14 +397,17 @@ ${positionContext}
 **核心决策九大军规 (The 9 Commandments)**:
 
 1. **本金保护 (Capital Protection)**:
-   - 使用 **棘轮机制** 移动止损：止损价严禁回撤。
-   - **关键调整**：在【净利润 < 0】的亏损/回本途中，**严禁激进上调止损**。
+   - 使用 **棘轮机制 (Ratchet)** 移动止损：止损价 **只能向盈利更多的方向移动**，严禁回调。
+   - **关键调整**：在【净利润 < 0】的亏损/回本途中，**严禁激进回调止损**，**只能向盈利更多的方向移动**。
    - 除非出现极强的结构性支撑，否则不要因为微小的价格反弹就紧跟移动止损，这会导致在达到盈亏平衡前被市场噪音震荡出局。
-   - 如 Long: New SL >= Old SL。如 Short: New SL <= Old SL。
+   - **多头 (Long)**: 目标是 SL 向上移至 Breakeven 甚至更高。**New SL 必须 >= Old SL**。
+   - **空头 (Short)**: 目标是 SL 向下移至 Breakeven 甚至更低。**New SL 必须 <= Old SL**。
 
 2. **锁定利润 (Lock-in Profit)**:
-   - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区后，才迅速将 SL 移动到 **Breakeven Price** 之上。
-   - 此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动
+   - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区时，才迅速调整 SL：
+     - **Long**: SL 设在 Breakeven 价格 **之上**。
+     - **Short**: SL 设在 Breakeven 价格 **之下**。
+     - 此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动
 
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
@@ -424,17 +427,17 @@ ${positionContext}
 6. **核心目标**:
    - 一切决策以 **净利润 (Net Profit)** 为核心。净利润 = 浮盈 - 双边手续费。
 
-7. **盈亏平衡前的呼吸空间 (Pre-Breakeven Buffer)**:
+7. **波动容忍 (Volatility Filter)**:
    - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
    - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动，以免被微小噪音扫损。
    - 但一旦进入盈利区，容忍度应迅速收紧。
 
 8. **锚点战术 (Anchor Point)**:
    - 交易所的 **Breakeven Price** 是最重要的战场分界线。
-   - 你的战术路径：忍受波动 -> 触达 Breakeven -> 迅速将 SL 移至 Breakeven 之上 -> 开启无限追利模式。
+   - 你的战术路径：忍受波动 -> 触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线（多单向上跨越，空单向下跨越） -> 开启无限追利模式。
 
 9. **AI 动态风控与绩效校准**:
-   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
+   - 一旦实现盈亏平衡 (持有多单情况下 SL 向上跨越 Breakeven，持有空单情况下 SL 向下跨越 Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
    - **夏普比率校准 (仅针对开仓/加仓)**: 
      - 若当前**持有仓位**：夏普比率影响**降至最低**。此时应优先遵循价格行为和止盈止损规则。
      - 若当前**空仓或计划加仓**：且 Sharpe < 0，必须**大幅降低开仓规模**，提高入场标准。
@@ -463,7 +466,7 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之(上/下)？夏普比率如何影响了你的决策？"
   }
   `;
 
@@ -503,6 +506,8 @@ ${positionContext}
                     decision.reasoning += " [系统拦截: 违反棘轮机制，禁止降低多单止损]";
                 }
             } else if (p.posSide === 'short') {
+                // For Short: Lower price is better. SL should decrease (move down).
+                // If New SL > Old SL, it means moving stop loss UP (looser), which is bad.
                 if (newSL > currentSL) {
                     console.warn(`[Ratchet Guard] 拦截无效指令: 空单止损不能上移 (${currentSL} -> ${newSL})`);
                     decision.action = 'HOLD';
