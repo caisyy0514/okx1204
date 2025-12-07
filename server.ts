@@ -68,15 +68,15 @@ const runTradingLoop = async () => {
         const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
         
         if (hasPosition) {
-            // [Holding Mode]: High Frequency (15s)
+            // [Holding Mode]: High Frequency (30s)
             // Critical for Ratchet Stop Loss, Profit Taking, and Emergency Close
-            aiInterval = 15000; 
+            aiInterval = 30000; 
             modeText = "持仓高频监测";
         } else {
-            // [Empty Mode]: Low Frequency (60s)
+            // [Empty Mode]: Low Frequency (120s)
             // Save tokens while scanning for entry opportunities. 
             // 60s is sufficient for 15m candle based strategies.
-            aiInterval = 60000; 
+            aiInterval = 120000; 
             modeText = "空仓低频扫描";
         }
     }
