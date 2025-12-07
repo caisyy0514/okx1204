@@ -1,10 +1,11 @@
+
 import React, { useEffect, useState } from 'react';
 import CandleChart from './components/CandleChart';
 import SettingsModal from './components/SettingsModal';
 import HistoryModal from './components/HistoryModal';
 import DecisionReport from './components/DecisionReport';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig, PositionData } from './types';
-import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X } from 'lucide-react';
+import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X, BarChart2 } from 'lucide-react';
 import { DEFAULT_CONFIG, INSTRUMENT_ID, CONTRACT_VAL_ETH, TAKER_FEE_RATE } from './constants';
 
 const App: React.FC = () => {
@@ -195,6 +196,9 @@ const App: React.FC = () => {
     );
   };
 
+  const sharpe = accountData?.sharpeRatio ?? 0;
+  const sharpeColor = sharpe < 0 ? 'text-red-400' : sharpe < 1 ? 'text-yellow-400' : 'text-green-400';
+
   return (
     <div className="h-screen bg-okx-bg text-okx-text font-sans selection:bg-okx-primary selection:text-white flex flex-col overflow-hidden">
       {/* Header (Fixed) */}
@@ -217,6 +221,11 @@ const App: React.FC = () => {
                 <div className="w-px h-3 bg-gray-700"></div>
                 <div>
                    可用: <span className="text-white font-bold">{accountData?.balance.availEq || '0.00'}</span>
+                </div>
+                 <div className="w-px h-3 bg-gray-700"></div>
+                <div className="flex items-center gap-1" title="Sharpe Ratio (夏普比率)">
+                   <BarChart2 size={14} className="text-gray-400"/>
+                   Sharpe: <span className={`font-bold ${sharpeColor}`}>{sharpe.toFixed(2)}</span>
                 </div>
              </div>
 
