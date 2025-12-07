@@ -1,3 +1,4 @@
+
 import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
 import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
@@ -207,8 +208,9 @@ export const getTradingDecision = async (
   const totalEquity = parseFloat(accountData.balance.totalEq);
   const availableEquity = parseFloat(accountData.balance.availEq);
   const openInterest = parseFloat(marketData.openInterest || "1"); 
+  const sharpeRatio = accountData.sharpeRatio || 0; // Performance Metric
 
-  // K-Line Data Arrays
+  // K-Line Data Arrays (15m for short term indicators)
   const candles = marketData.candles15m || [];
   const closes = candles.map(c => parseFloat(c.c));
   const highs = candles.map(c => parseFloat(c.h));
@@ -237,7 +239,34 @@ export const getTradingDecision = async (
   else if (kdj.k > kdj.d) kdjSignalStr = "金叉向上";
   else kdjSignalStr = "死叉向下";
 
-  // --- 3. 核心：持仓分析与利润保护计算 (Advanced Position Analysis) ---
+  // --- 3. 核心：1小时级别 EMA 趋势判断 (EMA15 vs EMA60) ---
+  const candles1H = marketData.candles1H || [];
+  let emaTrendStr = "震荡/无明确趋势";
+  
+  if (candles1H.length > 60) {
+      const closes1H = candles1H.map(c => parseFloat(c.c));
+      const latestClose1H = closes1H[closes1H.length - 1];
+      const latestOpen1H = parseFloat(candles1H[candles1H.length - 1].o);
+      
+      const ema15_1H = calcEMA(closes1H, 15);
+      const ema60_1H = calcEMA(closes1H, 60);
+      
+      const isUpCross = ema15_1H > ema60_1H; // Simplified check: if 15 above 60
+      const isYang = latestClose1H > latestOpen1H; // Red/Green candle check
+      const isYin = latestClose1H < latestOpen1H;
+
+      if (isUpCross && isYang) {
+          emaTrendStr = "强上涨趋势 (EMA15 > EMA60 + 收阳)";
+      } else if (!isUpCross && isYin) {
+          emaTrendStr = "强下跌趋势 (EMA15 < EMA60 + 收阴)";
+      } else if (isUpCross) {
+          emaTrendStr = "多头排列 (但K线收阴, 需观察)";
+      } else {
+          emaTrendStr = "空头排列 (但K线收阳, 需观察)";
+      }
+  }
+
+  // --- 4. 核心：持仓分析与利润保护计算 (Advanced Position Analysis) ---
   const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
   
   let stageName = "";
@@ -328,15 +357,24 @@ export const getTradingDecision = async (
   // --- NEW: Perform "Internet Search" (Fetch Real-time News) ---
   const newsContext = await fetchRealTimeNews();
 
-  // --- 4. 构建 Prompt (Refined 9 Rules + Internet Search) ---
+  // --- 5. 构建 Prompt (Refined 9 Rules + Internet Search + EMA Trend + Sharpe) ---
   
   const marketDataBlock = `
 价格: ${currentPrice.toFixed(2)}
 波动: ${dailyChange.toFixed(2)}%
+【1H 趋势信号】: ${emaTrendStr} (关键决策参考)
 MACD: ${macdSignalStr}
 RSI: ${rsi14.toFixed(2)}
 KDJ: ${kdjSignalStr}
 布林: ${bollPosStr}
+`;
+
+  const performanceBlock = `
+【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
+- Sharpe < 0: 平均亏损 -> 需大幅减小头寸，严格止损，极度挑剔。
+- Sharpe 0-1: 正回报但波动大 -> 保持谨慎，适当减小头寸。
+- Sharpe 1-2: 良好表现 -> 保持当前策略节奏。
+- Sharpe > 2: 卓越表现 -> 保持纪律，防止飘飘然。
 `;
 
   const systemPrompt = `
@@ -345,8 +383,9 @@ KDJ: ${kdjSignalStr}
 你具备 **实时联网搜索能力**，必须结合下方的【实时互联网情报】进行综合研判。
 
 **当前环境**:
-- 阶段: ${stageName} (杠杆 ${currentStageParams.leverage}x)
+- 阶段: ${stageName} (基础杠杆 ${currentStageParams.leverage}x)
 - 市场: ${marketDataBlock}
+- 绩效: ${performanceBlock}
 
 **实时互联网情报 (Real-time Internet Search)**:
 ${newsContext}
@@ -358,10 +397,11 @@ ${positionContext}
 
 **核心决策九大军规 (The 9 Commandments)**:
 
-1. **本金保护与耐心 (Ratchet & Patience)**:
+1. **本金保护 (Capital Protection)**:
    - 使用 **棘轮机制** 移动止损：止损价严禁回撤。
    - **关键调整**：在【净利润 < 0】的亏损/回本途中，**严禁激进上调止损**。
    - 除非出现极强的结构性支撑，否则不要因为微小的价格反弹就紧跟移动止损，这会导致在达到盈亏平衡前被市场噪音震荡出局。
+   - 如 Long: New SL >= Old SL。如 Short: New SL <= Old SL。
 
 2. **锁定利润 (Lock-in Profit)**:
    - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区后，才迅速将 SL 移动到 **Breakeven Price** 之上。
@@ -370,6 +410,7 @@ ${positionContext}
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
    - 使用 **移动止损 (Trailing SL)** 来跟随趋势，让利润奔跑，直到趋势反转触碰 SL 离场。
+   - **新增趋势判定**: 必须参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，坚定看涨；若下穿且收阴，坚定看跌。
 
 4. **补仓机制 (Smart DCA)**:
    - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
@@ -386,14 +427,19 @@ ${positionContext}
 
 7. **盈亏平衡前的呼吸空间 (Pre-Breakeven Buffer)**:
    - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
-   - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动。
+   - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动，以免被微小噪音扫损。
+   - 但一旦进入盈利区，容忍度应迅速收紧。
 
 8. **锚点战术 (Anchor Point)**:
    - 交易所的 **Breakeven Price** 是最重要的战场分界线。
    - 你的战术路径：忍受波动 -> 触达 Breakeven -> 迅速将 SL 移至 Breakeven 之上 -> 开启无限追利模式。
 
-9. **AI 动态风控**:
-   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏，最大化捕捉利润。
+9. **AI 动态风控与绩效校准**:
+   - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
+   - **夏普比率校准**: 
+     - 若 Sharpe Ratio < 0: **强制降低开仓仓位 (如减半)**，收紧止损范围，减少开单频率。
+     - 若 Sharpe Ratio 0-1: 保持谨慎。
+     - 若 Sharpe Ratio > 1: 策略有效，保持当前节奏。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -408,7 +454,7 @@ ${positionContext}
   {
     "stage_analysis": "简述...",
     "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
-    "market_assessment": "...",
+    "market_assessment": "重点点评 EMA 趋势状态...",
     "eth_analysis": "...", 
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
@@ -419,7 +465,7 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？新闻是否影响策略？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
   }
   `;
 
@@ -475,7 +521,14 @@ ${positionContext}
     // Auto-fix sizing for BUY/SELL
     if (decision.action === 'BUY' || decision.action === 'SELL') {
         const isAdding = hasPosition; // DCA or Pyramiding
-        const riskFactor = isAdding ? 0.3 : currentStageParams.risk_factor; // 加仓动作风险系数较低
+        let riskFactor = isAdding ? 0.3 : currentStageParams.risk_factor; 
+
+        // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
+        if (sharpeRatio < 0) {
+            riskFactor = riskFactor * 0.5; // Cut size in half if performance is bad
+        } else if (sharpeRatio > 0 && sharpeRatio < 1) {
+            riskFactor = riskFactor * 0.8; // Reduce slightly
+        }
 
         // 1. Determine Target Contracts from AI or Algo
         let targetContracts = 0;
