@@ -49,12 +49,14 @@ export interface PositionData {
 export interface AccountContext {
   balance: AccountBalance;
   positions: PositionData[];
+  sharpeRatio?: number; // NEW: Performance Metric
 }
 
 export interface MarketDataCollection {
   ticker: TickerData | null;
   candles5m: CandleData[];
   candles15m: CandleData[]; // Used for indicators (4H simulated by aggregating or just using 15m as proxy for short term)
+  candles1H: CandleData[]; // NEW: Used for EMA Trend Strategy
   fundingRate: string;
   openInterest: string;
   orderbook: any; 
