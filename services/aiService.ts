@@ -1,4 +1,3 @@
-
 import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
 import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
@@ -371,9 +370,9 @@ KDJ: ${kdjSignalStr}
 
   const performanceBlock = `
 【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
-- Sharpe < 0: 平均亏损 -> 需大幅减小头寸，严格止损，极度挑剔。
-- Sharpe 0-1: 正回报但波动大 -> 保持谨慎，适当减小头寸。
-- Sharpe 1-2: 良好表现 -> 保持当前策略节奏。
+- Sharpe < 0: 平均亏损 -> 若**空仓**，请大幅减小头寸，严格止损，极度挑剔。
+- Sharpe 0-1: 正回报但波动大 -> 若**空仓**，保持谨慎，适当减小头寸。
+- Sharpe 1-2: 良好表现 -> 策略有效，正常交易。
 - Sharpe > 2: 卓越表现 -> 保持纪律，防止飘飘然。
 `;
 
@@ -436,10 +435,9 @@ ${positionContext}
 
 9. **AI 动态风控与绩效校准**:
    - 一旦实现盈亏平衡 (SL > Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
-   - **夏普比率校准**: 
-     - 若 Sharpe Ratio < 0: **强制降低开仓仓位 (如减半)**，收紧止损范围，减少开单频率。
-     - 若 Sharpe Ratio 0-1: 保持谨慎。
-     - 若 Sharpe Ratio > 1: 策略有效，保持当前节奏。
+   - **夏普比率校准 (仅针对开仓/加仓)**: 
+     - 若当前**持有仓位**：夏普比率影响**降至最低**。此时应优先遵循价格行为和止盈止损规则。
+     - 若当前**空仓或计划加仓**：且 Sharpe < 0，必须**大幅降低开仓规模**，提高入场标准。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -524,6 +522,7 @@ ${positionContext}
         let riskFactor = isAdding ? 0.3 : currentStageParams.risk_factor; 
 
         // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
+        // ONLY apply stricter risk controls if entering a new position or adding risk
         if (sharpeRatio < 0) {
             riskFactor = riskFactor * 0.5; // Cut size in half if performance is bad
         } else if (sharpeRatio > 0 && sharpeRatio < 1) {
