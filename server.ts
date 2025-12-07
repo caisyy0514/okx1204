@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -27,6 +28,10 @@ let decisionHistory: AIDecision[] = []; // Store history
 let logs: SystemLog[] = [];
 let lastAnalysisTime = 0;
 
+// Performance Tracking
+let equityHistory: number[] = [];
+const MAX_EQUITY_HISTORY = 1000;
+
 // Helper to add logs
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
@@ -41,12 +46,56 @@ const addLog = (type: SystemLog['type'], message: string) => {
   console.log(`[${type}] ${message}`);
 };
 
+// Helper: Calculate Sharpe Ratio
+const calculateSharpeRatio = (history: number[]): number => {
+    if (history.length < 2) return 0;
+    
+    const returns: number[] = [];
+    for (let i = 1; i < history.length; i++) {
+        const prev = history[i - 1];
+        const curr = history[i];
+        if (prev === 0) continue;
+        returns.push((curr - prev) / prev);
+    }
+    
+    if (returns.length === 0) return 0;
+    
+    const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+    
+    const squaredDiffs = returns.map(r => Math.pow(r - meanReturn, 2));
+    const avgSquaredDiff = squaredDiffs.reduce((a, b) => a + b, 0) / returns.length;
+    const stdDev = Math.sqrt(avgSquaredDiff);
+    
+    if (stdDev === 0) return 0;
+    
+    // Assuming Risk Free Rate is negligible for short term high frequency
+    return meanReturn / stdDev;
+};
+
 // --- Background Trading Loop ---
 const runTradingLoop = async () => {
     // 1. Fetch Data (Keep fetching OKX data frequently to maintain chart/UI updates)
     try {
         marketData = await okxService.fetchMarketData(config);
         accountData = await okxService.fetchAccountData(config);
+        
+        // Update Equity History for Sharpe Calculation
+        if (accountData) {
+            const currentEq = parseFloat(accountData.balance.totalEq);
+            if (!isNaN(currentEq)) {
+                // Only push if changed significantly or interval passed (to avoid noise)
+                // For simplicity, we push every successful fetch, but limit size
+                equityHistory.push(currentEq);
+                if (equityHistory.length > MAX_EQUITY_HISTORY) {
+                    equityHistory = equityHistory.slice(-MAX_EQUITY_HISTORY);
+                }
+                
+                // Calculate Sharpe and inject into accountData context
+                const sharpe = calculateSharpeRatio(equityHistory);
+                accountData.sharpeRatio = parseFloat(sharpe.toFixed(4));
+            }
+        }
+
     } catch (e: any) {
         if (isRunning) addLog('ERROR', `数据同步失败: ${e.message}`);
         return;
@@ -68,15 +117,12 @@ const runTradingLoop = async () => {
         const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
         
         if (hasPosition) {
-            // [Holding Mode]: High Frequency (30s)
-            // Critical for Ratchet Stop Loss, Profit Taking, and Emergency Close
-            aiInterval = 30000; 
+            // [Holding Mode]: High Frequency (15s)
+            aiInterval = 15000; 
             modeText = "持仓高频监测";
         } else {
-            // [Empty Mode]: Low Frequency (120s)
-            // Save tokens while scanning for entry opportunities. 
-            // 60s is sufficient for 15m candle based strategies.
-            aiInterval = 120000; 
+            // [Empty Mode]: Low Frequency (60s)
+            aiInterval = 60000; 
             modeText = "空仓低频扫描";
         }
     }
