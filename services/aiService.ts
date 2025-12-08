@@ -417,7 +417,7 @@ ${positionContext}
 4. **补仓机制 (Smart DCA)**:
    - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
    - 目的：摊低成本 (Average Down)。
-   - **资金分配原则**: 补仓/加仓必须**循序渐进**，严禁梭哈。建议单次补仓只使用剩余资金的 20%-30%。
+   - **资金分配原则**: 补仓/加仓必须**循序渐进**，严禁梭哈。建议单次补仓只使用剩余资金的 10%-30%。
    - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
 
 5. **金字塔加仓 (Pyramiding)**:
@@ -432,7 +432,7 @@ ${positionContext}
    - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
    - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动，以免被微小噪音扫损。
    - 但一旦进入盈利区，容忍度应迅速收紧。
-   
+
 8. **锚点战术 (Anchor Point)**:
    - 交易所的 **Breakeven Price** 是最重要的战场分界线。
    - 你的战术路径：忍受波动 -> 触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线（多单向上跨越，空单向下跨越） -> 开启无限追利模式。
@@ -460,7 +460,7 @@ ${positionContext}
   {
     "stage_analysis": "简述...",
     "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
-    "market_assessment": "重点点评 EMA 趋势状态...",
+    "market_assessment": "...",
     "eth_analysis": "...", 
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
@@ -543,12 +543,16 @@ ${positionContext}
 
         // 1. Determine Target Contracts from AI or Algo
         let targetContracts = 0;
+        
+        // Check Price Validity to prevent NaN
+        const priceForCalc = currentPrice > 0 ? currentPrice : 1; 
+
         if (!decision.trading_decision.position_size || decision.trading_decision.position_size === "0") {
              const confidence = parseFloat(decision.trading_decision.confidence) || 50;
              // Calculate margin to use based on the strict risk factor (30% for new, 25% for add)
              const marginToUse = availableEquity * riskFactor * (confidence / 100);
              const posValue = marginToUse * safeLeverage;
-             targetContracts = posValue / (CONTRACT_VAL_ETH * currentPrice);
+             targetContracts = posValue / (CONTRACT_VAL_ETH * priceForCalc);
         } else {
              targetContracts = parseFloat(decision.trading_decision.position_size);
         }
@@ -561,9 +565,10 @@ ${positionContext}
         const effectiveMaxMargin = isAdding ? maxMargin : Math.min(maxMargin, availableEquity * 0.30);
         
         const maxPosValue = effectiveMaxMargin * safeLeverage;
-        const maxContracts = maxPosValue / (CONTRACT_VAL_ETH * currentPrice);
+        const maxContracts = maxPosValue / (CONTRACT_VAL_ETH * priceForCalc);
 
         // 3. Cap Size
+        if (isNaN(targetContracts)) targetContracts = 0; // Prevent NaN
         if (targetContracts > maxContracts) {
             console.warn(`[Risk Control] AI suggested size ${targetContracts.toFixed(2)} exceeds balance/risk limit. Capped at ${maxContracts.toFixed(2)}`);
             decision.reasoning += ` [资金管控: 仓位限制在 ${isAdding?'余粮':'总资金'} 的 ${(riskFactor*100).toFixed(0)}% (${maxContracts.toFixed(2)}张)]`;
@@ -574,8 +579,9 @@ ${positionContext}
         decision.leverage = safeLeverage.toString();
 
         // Final check: if calculated size is still effectively 0 or invalid given min size constraints vs balance
-        if (parseFloat(decision.size) < 0.01) {
-             console.warn("[Risk Control] Insufficient balance for minimum order size. Forcing HOLD.");
+        // Also check against NaN again just in case
+        if (parseFloat(decision.size) < 0.01 || isNaN(parseFloat(decision.size))) {
+             console.warn("[Risk Control] Insufficient balance for minimum order size (or NaN). Forcing HOLD.");
              decision.action = 'HOLD';
              decision.size = "0";
              decision.reasoning += " [系统拦截: 账户余额不足以开出最小仓位]";
