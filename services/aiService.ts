@@ -370,7 +370,7 @@ KDJ: ${kdjSignalStr}
 
   const performanceBlock = `
 【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
-- Sharpe < 0: 平均亏损 -> 若**空仓**，请减小头寸，严格止损，极度挑剔。
+- Sharpe < 0: 平均亏损 -> 若**空仓**，请大幅减小头寸，严格止损，极度挑剔。
 - Sharpe 0-1: 正回报但波动大 -> 若**空仓**，保持谨慎，适当减小头寸。
 - Sharpe 1-2: 良好表现 -> 策略有效，正常交易。
 - Sharpe > 2: 卓越表现 -> 保持纪律，防止飘飘然。
@@ -412,12 +412,13 @@ ${positionContext}
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
    - 使用 **移动止损 (Trailing SL)** 来跟随趋势，让利润奔跑，直到趋势反转触碰 SL 离场。
-   - **新增趋势判定**: 必须参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，看涨；若下穿且收阴，看跌。
+   - **新增趋势判定**: 必须参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，坚定看涨；若下穿且收阴，坚定看跌。
 
 4. **补仓机制 (Smart DCA)**:
    - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
    - 目的：摊低成本 (Average Down)。
-   - **资金分配原则**: 补仓/加仓必须**循序渐进**，严禁梭哈。建议单次补仓只使用剩余资金的 10%-30%。
+   - **资金分配原则**: 补仓金额应基于**当前账户可用余额 (Available Equity)**，而非当前持仓量。
+   - 建议每次补仓使用 **可用余额的 10%-20%**，循序渐进。
    - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
 
 5. **金字塔加仓 (Pyramiding)**:
@@ -443,9 +444,10 @@ ${positionContext}
      - 若当前**持有仓位**：夏普比率影响**降至最低**。此时应优先遵循价格行为和止盈止损规则。
      - 若当前**空仓或计划加仓**：且 Sharpe < 0，必须**降低开仓规模**，提高入场标准。
 
-**首次开仓资金红线**:
-- 若当前**无持仓**，首次建仓的保证金严禁超过 **可用余额的 30%**。
-- 剩余 70% 资金必须保留用于后续的风控补仓或趋势加仓。
+**资金管理红线 (重要)**:
+- **[首次开仓]**: 保证金严禁超过 **可用余额的 30%**。
+- **[补仓/加仓]**: 单次保证金使用 **可用余额的 10%-20%**。
+- 请在 reasoning 中明确说明你是 "首次开仓" 还是 "补仓/加仓"。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -471,7 +473,7 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
+    "reasoning": "明确说明：这是[首次开仓]还是[补仓]？解释是否触发棘轮？夏普比率如何影响了你的决策？"
   }
   `;
 
@@ -528,58 +530,71 @@ ${positionContext}
     if (decision.action === 'BUY' || decision.action === 'SELL') {
         const isAdding = hasPosition; // DCA or Pyramiding
         
-        // --- 核心资金管理修改 ---
-        // 1. 若为加仓/补仓：使用较小的风险系数 (20-30% of remaining)
-        // 2. 若为首次开仓：强制限制在 30% of Total Available Equity
-        let riskFactor = isAdding ? 0.25 : 0.30; 
+        // --- 核心资金管理修改 (修正版) ---
+        // 1. 若为加仓/补仓：使用可用余额的 10%-20%
+        // 2. 若为首次开仓：使用可用余额的 30%
+        // 注意：不依赖AI的position_size，而是基于当前 availableEquity 重新计算推荐值，
+        // 除非AI给出的数值非常明确且在合理范围内。这里为了稳健，如果AI数值异常，则回退到算法。
 
         // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
-        // ONLY apply stricter risk controls if entering a new position or adding risk
+        let sharpeModifier = 1.0;
         if (sharpeRatio < 0) {
-            riskFactor = riskFactor * 0.5; // Cut size in half if performance is bad
+            sharpeModifier = 0.5; // Cut size in half if performance is bad
         } else if (sharpeRatio > 0 && sharpeRatio < 1) {
-            riskFactor = riskFactor * 0.8; // Reduce slightly
+            sharpeModifier = 0.8; // Reduce slightly
         }
 
-        // 1. Determine Target Contracts from AI or Algo
-        let targetContracts = 0;
-        
-        // Check Price Validity to prevent NaN
+        // 1. Determine Target Contracts from Algo
         const priceForCalc = currentPrice > 0 ? currentPrice : 1; 
-
-        if (!decision.trading_decision.position_size || decision.trading_decision.position_size === "0") {
-             const confidence = parseFloat(decision.trading_decision.confidence) || 50;
-             // Calculate margin to use based on the strict risk factor (30% for new, 25% for add)
-             const marginToUse = availableEquity * riskFactor * (confidence / 100);
-             const posValue = marginToUse * safeLeverage;
-             targetContracts = posValue / (CONTRACT_VAL_ETH * priceForCalc);
-        } else {
-             targetContracts = parseFloat(decision.trading_decision.position_size);
-        }
-
-        // 2. Calculate Max Available Contracts (Safety Check)
-        // Max Margin = availableEquity * 0.95 (reserve 5% for fees/slippage/volatility)
-        // Max Position Value = Max Margin * Leverage
-        const maxMargin = availableEquity * 0.95;
-        // Double check: if it's a new trade, hard cap at 30% of equity even if AI suggests more
-        const effectiveMaxMargin = isAdding ? maxMargin : Math.min(maxMargin, availableEquity * 0.30);
         
-        const maxPosValue = effectiveMaxMargin * safeLeverage;
-        const maxContracts = maxPosValue / (CONTRACT_VAL_ETH * priceForCalc);
+        // Calculate Base Margin based on Strategy
+        let baseRiskRatio = 0;
+        if (isAdding) {
+            baseRiskRatio = 0.15; // DCA use 15% of *remaining* equity
+        } else {
+            baseRiskRatio = 0.30; // Initial Entry use 30% of equity
+        }
+        
+        // Apply Sharpe Modifier to Risk Ratio
+        const effectiveRiskRatio = baseRiskRatio * sharpeModifier;
+        const marginToUse = availableEquity * effectiveRiskRatio;
+        const posValue = marginToUse * safeLeverage;
+        const algoContracts = posValue / (CONTRACT_VAL_ETH * priceForCalc);
 
-        // 3. Cap Size
-        if (isNaN(targetContracts)) targetContracts = 0; // Prevent NaN
-        if (targetContracts > maxContracts) {
-            console.warn(`[Risk Control] AI suggested size ${targetContracts.toFixed(2)} exceeds balance/risk limit. Capped at ${maxContracts.toFixed(2)}`);
-            decision.reasoning += ` [资金管控: 仓位限制在 ${isAdding?'余粮':'总资金'} 的 ${(riskFactor*100).toFixed(0)}% (${maxContracts.toFixed(2)}张)]`;
-            targetContracts = maxContracts;
+        // 2. Process AI Suggestion
+        let finalContracts = 0;
+        let aiContracts = 0;
+        
+        if (decision.trading_decision.position_size && decision.trading_decision.position_size !== "0") {
+             aiContracts = parseFloat(decision.trading_decision.position_size);
         }
 
-        decision.size = Math.max(targetContracts, 0.01).toFixed(2);
+        // 3. Decision Logic: AI vs Algo
+        // If AI gives valid number, verify it against cap.
+        // If AI gives 0 or NaN, use Algo.
+        if (aiContracts > 0 && !isNaN(aiContracts)) {
+             finalContracts = aiContracts;
+        } else {
+             finalContracts = algoContracts;
+        }
+
+        // 4. Calculate Max Available Contracts (Safety Cap)
+        // Hard Cap: Initial Trade Max 30%, DCA Max 20% of current available
+        const capRatio = isAdding ? 0.20 : 0.30;
+        const maxMarginCap = availableEquity * capRatio;
+        const maxPosValueCap = maxMarginCap * safeLeverage;
+        const maxContractsCap = maxPosValueCap / (CONTRACT_VAL_ETH * priceForCalc);
+
+        if (finalContracts > maxContractsCap) {
+            console.warn(`[Risk Control] Size ${finalContracts.toFixed(2)} exceeds cap. Limited to ${maxContractsCap.toFixed(2)}`);
+            decision.reasoning += ` [资金管控: 仓位限制在余额的 ${(capRatio*100).toFixed(0)}% (${maxContractsCap.toFixed(2)}张)]`;
+            finalContracts = maxContractsCap;
+        }
+
+        decision.size = Math.max(finalContracts, 0.01).toFixed(2);
         decision.leverage = safeLeverage.toString();
 
         // Final check: if calculated size is still effectively 0 or invalid given min size constraints vs balance
-        // Also check against NaN again just in case
         if (parseFloat(decision.size) < 0.01 || isNaN(parseFloat(decision.size))) {
              console.warn("[Risk Control] Insufficient balance for minimum order size (or NaN). Forcing HOLD.");
              decision.action = 'HOLD';
