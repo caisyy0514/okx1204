@@ -1,4 +1,3 @@
-
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext } from "../types";
 import { INSTRUMENT_ID, MOCK_TICKER, CONTRACT_VAL_ETH } from "../constants";
 import CryptoJS from 'crypto-js';
@@ -27,6 +26,19 @@ const getHeaders = (method: string, requestPath: string, body: string = '', conf
     'OK-ACCESS-TIMESTAMP': timestamp,
     'OK-ACCESS-SIMULATED': '0' 
   };
+};
+
+// Helper: Extract valid price number from string (e.g. "3100 (approx)" -> "3100")
+const extractPrice = (p: string | undefined): string | null => {
+    if (!p) return null;
+    // Regex to find the first sequence of digits and dots
+    const match = p.match(/[\d.]+/); 
+    if (match) {
+        const val = parseFloat(match[0]);
+        // Ensure it's a valid positive number
+        return !isNaN(val) && val > 0 ? val.toString() : null;
+    }
+    return null;
 };
 
 export const fetchMarketData = async (config: any): Promise<MarketDataCollection> => {
@@ -288,10 +300,10 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     // Attach TP/SL (attachAlgoOrds)
     const tpPrice = order.trading_decision?.profit_target;
     const slPrice = order.trading_decision?.stop_loss;
-    const cleanPrice = (p: string | undefined) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0 ? p : null;
 
-    const validTp = cleanPrice(tpPrice);
-    const validSl = cleanPrice(slPrice);
+    // Use extractPrice to sanitize text inputs from AI
+    const validTp = extractPrice(tpPrice);
+    const validSl = extractPrice(slPrice);
 
     if (validTp || validSl) {
         const algoOrder: any = {};
@@ -346,10 +358,15 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
 
         // 2. Place new Algo Order (Conditional Close) FIRST
         // If placing fails, we throw and DO NOT cancel old orders (safeguard)
-        if (slPrice || tpPrice) {
+        
+        // Clean prices
+        const cleanSL = extractPrice(slPrice);
+        const cleanTP = extractPrice(tpPrice);
+
+        if (cleanSL || cleanTP) {
             const path = "/api/v5/trade/order-algo";
             
-            if (slPrice) {
+            if (cleanSL) {
                 const slBody = JSON.stringify({
                     instId,
                     posSide,
@@ -358,7 +375,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                     ordType: 'conditional',
                     sz: size, 
                     reduceOnly: true,
-                    slTriggerPx: slPrice,
+                    slTriggerPx: cleanSL,
                     slOrdPx: '-1' // Market Close
                 });
                 const slHeaders = getHeaders('POST', path, slBody, config);
@@ -367,7 +384,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                 if (slJson.code !== '0') throw new Error(`设置新止损失败: ${slJson.msg}`);
             }
 
-            if (tpPrice) {
+            if (cleanTP) {
                  const tpBody = JSON.stringify({
                     instId,
                     posSide,
@@ -376,7 +393,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                     ordType: 'conditional',
                     sz: size,
                     reduceOnly: true,
-                    tpTriggerPx: tpPrice,
+                    tpTriggerPx: cleanTP,
                     tpOrdPx: '-1'
                 });
                 const tpHeaders = getHeaders('POST', path, tpBody, config);
@@ -459,14 +476,11 @@ function generateMockMarketData(): MarketDataCollection {
     return candles.reverse();
   };
 
-  // Generate 1H candles for mock
-  const candles1H = generateCandles(100).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
-
   return {
     ticker: { ...MOCK_TICKER, last: currentPrice.toFixed(2), ts: now.toString() },
     candles5m: generateCandles(50),
     candles15m: generateCandles(100),
-    candles1H: candles1H,
+    candles1H: generateCandles(100), // Mock 1H
     fundingRate: "0.0001",
     openInterest: "50000",
     orderbook: [],
