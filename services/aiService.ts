@@ -407,7 +407,7 @@ ${positionContext}
    - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区时，才迅速调整 SL：
      - **Long**: SL 设在 Breakeven 价格 **之上**。
      - **Short**: SL 设在 Breakeven 价格 **之下**。
-     - 此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动
+     - 这是优先级最高的任务：先保证不亏，再追求盈利，此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动。
 
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
@@ -417,6 +417,7 @@ ${positionContext}
 4. **补仓机制 (Smart DCA)**:
    - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
    - 目的：摊低成本 (Average Down)。
+   - **资金分配原则**: 补仓/加仓必须**循序渐进**，严禁梭哈。建议单次补仓只使用剩余资金的 20%-30%。
    - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
 
 5. **金字塔加仓 (Pyramiding)**:
@@ -431,7 +432,7 @@ ${positionContext}
    - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
    - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动，以免被微小噪音扫损。
    - 但一旦进入盈利区，容忍度应迅速收紧。
-
+   
 8. **锚点战术 (Anchor Point)**:
    - 交易所的 **Breakeven Price** 是最重要的战场分界线。
    - 你的战术路径：忍受波动 -> 触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线（多单向上跨越，空单向下跨越） -> 开启无限追利模式。
@@ -441,6 +442,10 @@ ${positionContext}
    - **夏普比率校准 (仅针对开仓/加仓)**: 
      - 若当前**持有仓位**：夏普比率影响**降至最低**。此时应优先遵循价格行为和止盈止损规则。
      - 若当前**空仓或计划加仓**：且 Sharpe < 0，必须**大幅降低开仓规模**，提高入场标准。
+
+**首次开仓资金红线**:
+- 若当前**无持仓**，首次建仓的保证金严禁超过 **可用余额的 30%**。
+- 剩余 70% 资金必须保留用于后续的风控补仓或趋势加仓。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -466,7 +471,7 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之(上/下)？夏普比率如何影响了你的决策？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
   }
   `;
 
@@ -506,8 +511,6 @@ ${positionContext}
                     decision.reasoning += " [系统拦截: 违反棘轮机制，禁止降低多单止损]";
                 }
             } else if (p.posSide === 'short') {
-                // For Short: Lower price is better. SL should decrease (move down).
-                // If New SL > Old SL, it means moving stop loss UP (looser), which is bad.
                 if (newSL > currentSL) {
                     console.warn(`[Ratchet Guard] 拦截无效指令: 空单止损不能上移 (${currentSL} -> ${newSL})`);
                     decision.action = 'HOLD';
@@ -524,7 +527,11 @@ ${positionContext}
     // Auto-fix sizing for BUY/SELL
     if (decision.action === 'BUY' || decision.action === 'SELL') {
         const isAdding = hasPosition; // DCA or Pyramiding
-        let riskFactor = isAdding ? 0.3 : currentStageParams.risk_factor; 
+        
+        // --- 核心资金管理修改 ---
+        // 1. 若为加仓/补仓：使用较小的风险系数 (20-30% of remaining)
+        // 2. 若为首次开仓：强制限制在 30% of Total Available Equity
+        let riskFactor = isAdding ? 0.25 : 0.30; 
 
         // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
         // ONLY apply stricter risk controls if entering a new position or adding risk
@@ -538,6 +545,7 @@ ${positionContext}
         let targetContracts = 0;
         if (!decision.trading_decision.position_size || decision.trading_decision.position_size === "0") {
              const confidence = parseFloat(decision.trading_decision.confidence) || 50;
+             // Calculate margin to use based on the strict risk factor (30% for new, 25% for add)
              const marginToUse = availableEquity * riskFactor * (confidence / 100);
              const posValue = marginToUse * safeLeverage;
              targetContracts = posValue / (CONTRACT_VAL_ETH * currentPrice);
@@ -549,13 +557,16 @@ ${positionContext}
         // Max Margin = availableEquity * 0.95 (reserve 5% for fees/slippage/volatility)
         // Max Position Value = Max Margin * Leverage
         const maxMargin = availableEquity * 0.95;
-        const maxPosValue = maxMargin * safeLeverage;
+        // Double check: if it's a new trade, hard cap at 30% of equity even if AI suggests more
+        const effectiveMaxMargin = isAdding ? maxMargin : Math.min(maxMargin, availableEquity * 0.30);
+        
+        const maxPosValue = effectiveMaxMargin * safeLeverage;
         const maxContracts = maxPosValue / (CONTRACT_VAL_ETH * currentPrice);
 
         // 3. Cap Size
         if (targetContracts > maxContracts) {
-            console.warn(`[Risk Control] AI suggested size ${targetContracts.toFixed(2)} exceeds balance. Capped at ${maxContracts.toFixed(2)}`);
-            decision.reasoning += ` [资金管控: 仓位限制在余额允许范围内 ${maxContracts.toFixed(2)}张]`;
+            console.warn(`[Risk Control] AI suggested size ${targetContracts.toFixed(2)} exceeds balance/risk limit. Capped at ${maxContracts.toFixed(2)}`);
+            decision.reasoning += ` [资金管控: 仓位限制在 ${isAdding?'余粮':'总资金'} 的 ${(riskFactor*100).toFixed(0)}% (${maxContracts.toFixed(2)}张)]`;
             targetContracts = maxContracts;
         }
 
