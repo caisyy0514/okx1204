@@ -1,3 +1,4 @@
+
 import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
 import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
@@ -370,9 +371,9 @@ KDJ: ${kdjSignalStr}
 
   const performanceBlock = `
 【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
-- Sharpe < 0: 平均亏损 -> 若**空仓**，请大幅减小头寸，严格止损，极度挑剔。
-- Sharpe 0-1: 正回报但波动大 -> 若**空仓**，保持谨慎，适当减小头寸。
-- Sharpe 1-2: 良好表现 -> 策略有效，正常交易。
+- Sharpe < 0: 平均亏损 -> 需大幅减小头寸，严格止损，极度挑剔。
+- Sharpe 0-1: 正回报但波动大 -> 保持谨慎，适当减小头寸。
+- Sharpe 1-2: 良好表现 -> 保持当前策略节奏。
 - Sharpe > 2: 卓越表现 -> 保持纪律，防止飘飘然。
 `;
 
@@ -403,23 +404,24 @@ ${positionContext}
    - **多头 (Long)**: 目标是 SL 向上移至 Breakeven 甚至更高。**New SL 必须 >= Old SL**。
    - **空头 (Short)**: 目标是 SL 向下移至 Breakeven 甚至更低。**New SL 必须 <= Old SL**。
 
-2. **锁定利润 (Lock-in Profit)**:
-   - 只有当【净利润 (Net PnL) > 0】且价格明显脱离成本区时，才迅速调整 SL：
-     - **Long**: SL 设在 Breakeven 价格 **之上**。
-     - **Short**: SL 设在 Breakeven 价格 **之下**。
-     - 这是优先级最高的任务：先保证不亏，再追求盈利，此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动。
+2. **锁定利润与防震荡 (Profit Locking & Noise Filtering)**:
+   - 当【净利润 (Net PnL) > 0】时，**严禁过于激进地调整 SL**。
+   - **降低止损调整频率**：不要仅仅因为微小盈利就急于将 SL 移至 Breakeven。
+   - 只有当价格**显著脱离**成本区（建立了足够的安全垫，例如盈利 > 0.5% 或突破关键结构）后，才将 SL 跨越 Breakeven（多单向上跨越，空单向下跨越）。
+   - 目的：避免因过早收紧止损而被正常波动（噪音）震荡出局。
+   - 这是优先级最高的任务：先保证不亏，再追求盈利，此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动。
 
 3. **趋势上限探索 (Trend Exploration)**:
    - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
    - 使用 **移动止损 (Trailing SL)** 来跟随趋势，让利润奔跑，直到趋势反转触碰 SL 离场。
-   - **新增趋势判定**: 必须参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，坚定看涨；若 EMA15 下穿 EMA60 且收阴，坚定看跌。
+   - **趋势判定**: 参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，看涨；若下穿且收阴，看跌。
 
 4. **补仓机制 (Smart DCA)**:
    - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
    - 目的：摊低成本 (Average Down)。
    - **资金分配原则**: 补仓金额应基于**当前账户可用余额 (Available Equity)**，而非当前持仓量。
    - 建议每次补仓使用 **可用余额的 10%-20%**，循序渐进。
-   - 禁忌：趋势已反转或仓位过重时，严禁补仓，应该直接止损。
+   - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
 
 5. **金字塔加仓 (Pyramiding)**:
    - 触发条件：【净利润 > 0】 + 趋势确认突破 + 风险可控。
@@ -430,23 +432,23 @@ ${positionContext}
    - 一切决策以 **净利润 (Net Profit)** 为核心。净利润 = 浮盈 - 双边手续费。
 
 7. **波动容忍 (Volatility Filter)**:
-   - 在价格未达到 Breakeven Price 之前，**给予市场充分的波动空间**。
-   - 不要为了减少那一点点潜在亏损而频繁操作 SL。在这个阶段，SL 应保持在初始逻辑失效点（Invaldiation Level），而不是跟随价格移动，以免被微小噪音扫损。
-   - 但一旦进入盈利区，容忍度应迅速收紧。
+   - 在寻找调整 SL 时机时，必须给予价格足够的 "呼吸空间" (Technical Stop)。
+   - 即使进入盈利区，也**不要过早收紧**容忍度，以免被市场噪音扫损离场。
 
 8. **锚点战术 (Anchor Point)**:
-   - 交易所的 **Breakeven Price** 是最重要的战场分界线。
-   - 你的战术路径：忍受波动 -> 触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线（多单向上跨越，空单向下跨越） -> 开启无限追利模式。
+   - 交易所的 **Breakeven Price** 是重要的参考线。
+   - 你的战术动作：在确保安全（不被轻易震出）的前提下，稳步推进 SL 跨越 Breakeven 线（多单向上跨越，空单向下跨越）。
 
 9. **AI 动态风控与绩效校准**:
    - 一旦实现盈亏平衡 (持有多单情况下 SL 向上跨越 Breakeven，持有空单情况下 SL 向下跨越 Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
-   - **夏普比率校准 (仅针对开仓/加仓)**: 
-     - 若当前**持有仓位**：夏普比率影响**降至最低**。此时应优先遵循价格行为和止盈止损规则。
-     - 若当前**空仓或计划加仓**：且 Sharpe < 0，必须**降低开仓规模**，提高入场标准。
+   - **夏普比率校准**: 
+     - 若 Sharpe Ratio < 0: **强制降低开仓仓位 (如减半)**，收紧止损范围，减少开单频率。
+     - 若 Sharpe Ratio 0-1: 保持谨慎。
+     - 若 Sharpe Ratio > 1: 策略有效，保持当前节奏。
 
 **资金管理红线 (重要)**:
-- **[首次开仓]**: 保证金严禁超过 **可用余额的 (Available Equity) 30%**。
-- **[补仓/加仓]**: 单次保证金使用 **可用余额的 (Available Equity) 10%-20%**。
+- **[首次开仓]**: 保证金严禁超过 **可用余额的 30%**。
+- **[补仓/加仓]**: 单次保证金使用 **可用余额的 10%-20%**。
 - 请在 reasoning 中明确说明你是 "首次开仓" 还是 "补仓/加仓"。
 
 **操作指令**:
@@ -462,7 +464,7 @@ ${positionContext}
   {
     "stage_analysis": "简述...",
     "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
-    "market_assessment": "...",
+    "market_assessment": "重点点评 EMA 趋势状态...",
     "eth_analysis": "...", 
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
@@ -473,7 +475,7 @@ ${positionContext}
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "明确说明：这是[首次开仓]还是[补仓]？解释是否触发棘轮？夏普比率如何影响了你的决策？"
+    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
   }
   `;
 
