@@ -80,8 +80,6 @@ const calcMACD = (prices: number[]) => {
   
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
-  // Calculate EMA12 and EMA26 arrays to get MACD line array
-  // Simplified: Just calculating the *latest* values for prompt
   const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
   const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
   
@@ -471,7 +469,7 @@ ${positionContext}
    - 随价格有利变动，持续按此逻辑推进 SL。
 
 4. **止盈 (分层 Tiered TP)**:
-   - 收益 > 5%: 平仓 30%。
+   - 收益 > 5%: 平仓 50%。
    - 收益 > 10%: 再平仓 30%，并将止损移至盈利 50% 处。
    - 收益 > 15%: 全部平仓。
    - **1H 趋势反转**: 立即全部平仓。
@@ -483,7 +481,7 @@ ${positionContext}
 
 6. **锚点战术**:
    - **Breakeven Price** 是最重要的战场分界线。
-   - 战术路径：触达 Breakeven -> 确保 SL 安全跨越 Breakeven 线 -> 开启无限追利。
+   - 战术路径：触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线 -> 开启无限追利。
 
 7. **核心目标**:
    - 一切决策以 **净利润 (Net Profit)** 为核心。
