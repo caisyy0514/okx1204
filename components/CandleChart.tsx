@@ -1,4 +1,5 @@
 
+
 import React, { useMemo } from 'react';
 import { ResponsiveContainer, ComposedChart, XAxis, YAxis, Tooltip, Bar, CartesianGrid, Line, Cell, ReferenceLine } from 'recharts';
 import { CandleData } from '../types';
@@ -7,19 +8,21 @@ interface Props {
   data: CandleData[];
 }
 
-// 辅助函数：计算移动平均线
-const calculateMA = (data: any[], period: number) => {
+// 辅助函数：计算 EMA (Exponential Moving Average)
+const calculateEMA = (data: any[], period: number) => {
+  if (data.length === 0) return [];
+  
+  const k = 2 / (period + 1);
   const result = [];
+  
+  // 初始化 EMA，通常第一个点可以用 SMA 代替，或者直接用第一个价格
+  let ema = data[0].c; 
+  
   for (let i = 0; i < data.length; i++) {
-    if (i < period - 1) {
-      result.push(null);
-      continue;
-    }
-    let sum = 0;
-    for (let j = 0; j < period; j++) {
-      sum += data[i - j].c;
-    }
-    result.push(sum / period);
+    const price = data[i].c;
+    // EMA Formula: Price(t) * k + EMA(y) * (1 - k)
+    ema = price * k + ema * (1 - k);
+    result.push(ema);
   }
   return result;
 };
@@ -28,7 +31,7 @@ const CandleChart: React.FC<Props> = ({ data }) => {
   const chartData = useMemo(() => {
     const processed = data.map(d => ({
       timeRaw: parseInt(d.ts),
-      time: new Date(parseInt(d.ts)).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+      time: new Date(parseInt(d.ts)).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', month: '2-digit', day: '2-digit'}),
       o: parseFloat(d.o),
       h: parseFloat(d.h),
       l: parseFloat(d.l),
@@ -36,13 +39,14 @@ const CandleChart: React.FC<Props> = ({ data }) => {
       vol: parseFloat(d.vol),
     }));
 
-    const ma7 = calculateMA(processed, 7);
-    const ma25 = calculateMA(processed, 25);
+    // Strategy uses EMA 21 and EMA 55
+    const ema21 = calculateEMA(processed, 21);
+    const ema55 = calculateEMA(processed, 55);
 
     return processed.map((item, i) => ({
       ...item,
-      ma7: ma7[i],
-      ma25: ma25[i],
+      ema21: ema21[i],
+      ema55: ema55[i],
       isUp: item.c >= item.o
     }));
   }, [data]);
@@ -132,8 +136,8 @@ const CandleChart: React.FC<Props> = ({ data }) => {
             contentStyle={{backgroundColor: 'rgba(24, 24, 27, 0.9)', borderColor: '#27272a', borderRadius: '4px', fontSize: '11px', padding: '8px'}}
             itemStyle={{padding: 0}}
             formatter={(value: any, name: string) => {
-                if (name === 'ma7') return [value?.toFixed(2), 'MA7'];
-                if (name === 'ma25') return [value?.toFixed(2), 'MA25'];
+                if (name === 'ema21') return [value?.toFixed(2), 'EMA21'];
+                if (name === 'ema55') return [value?.toFixed(2), 'EMA55'];
                 if (name === 'vol') return [parseInt(value).toLocaleString(), 'Vol'];
                 if (name === 'High') return [value, 'Price']; 
                 return [value, name];
@@ -162,12 +166,12 @@ const CandleChart: React.FC<Props> = ({ data }) => {
                                 <span className={data.isUp ? 'text-[#00C076]' : 'text-[#FF4D4F]'}>{data.c}</span>
                             </div>
                             <div className="flex justify-between gap-4 mt-1 pt-1 border-t border-gray-800">
-                                <span className="text-yellow-500">MA7</span>
-                                <span>{data.ma7?.toFixed(1)}</span>
+                                <span className="text-yellow-500">EMA21</span>
+                                <span>{data.ema21?.toFixed(1)}</span>
                             </div>
                             <div className="flex justify-between gap-4">
-                                <span className="text-purple-500">MA25</span>
-                                <span>{data.ma25?.toFixed(1)}</span>
+                                <span className="text-purple-500">EMA55</span>
+                                <span>{data.ema55?.toFixed(1)}</span>
                             </div>
                         </div>
                     );
@@ -184,8 +188,10 @@ const CandleChart: React.FC<Props> = ({ data }) => {
 
           <Bar dataKey="h" shape={(props: any) => <CandleStickShape {...props} />} isAnimationActive={false} />
 
-          <Line type="monotone" dataKey="ma7" stroke="#fbbf24" strokeWidth={1} dot={false} isAnimationActive={false} />
-          <Line type="monotone" dataKey="ma25" stroke="#a855f7" strokeWidth={1} dot={false} isAnimationActive={false} />
+          {/* EMA 21 (Yellow) */}
+          <Line type="monotone" dataKey="ema21" stroke="#fbbf24" strokeWidth={1} dot={false} isAnimationActive={false} />
+          {/* EMA 55 (Purple) */}
+          <Line type="monotone" dataKey="ema55" stroke="#a855f7" strokeWidth={1} dot={false} isAnimationActive={false} />
 
           {/* Current Price Line */}
           <ReferenceLine y={lastPrice} stroke="rgba(255, 255, 255, 0.4)" strokeDasharray="3 3" label={{ position: 'right',  value: lastPrice, fill: 'white', fontSize: 10 }} />
