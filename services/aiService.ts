@@ -259,9 +259,10 @@ export const getTradingDecision = async (
   }
 
   // --- 4. 核心：3分钟图 入场/出场信号 (Entry/Exit Signals) ---
+  // RENAMED VARIABLES TO PREVENT 'entry3m is not defined' ERROR
   const candles3m = marketData.candles3m || [];
-  let entrySignal3m = "NONE"; // 'BUY_SIGNAL' | 'SELL_SIGNAL' | 'NONE'
-  let stopLossTarget3m = 0;
+  let signal3mResult = "NONE"; // 'BUY_SIGNAL' | 'SELL_SIGNAL' | 'NONE'
+  let calcStopLoss3m = 0;
   
   if (candles3m.length > 65) {
       const closes3m = candles3m.map(c => parseFloat(c.c));
@@ -283,7 +284,7 @@ export const getTradingDecision = async (
       const isDeathCross = (ema15Array[idx] < ema60Array[idx]) && (ema15Array[idx-1] >= ema60Array[idx-1]);
 
       if (trend1H.direction === "UP" && isGoldenCross) {
-          entrySignal3m = "BUY_SIGNAL"; // Golden Cross
+          signal3mResult = "BUY_SIGNAL"; // Golden Cross
           // Find Lowest Low in the previous Death Cross Interval (where 15 < 60)
           let searchIdx = idx - 1;
           let minLow = lows3m[idx];
@@ -293,10 +294,10 @@ export const getTradingDecision = async (
               if (lows3m[searchIdx] < minLow) minLow = lows3m[searchIdx];
               searchIdx--;
           }
-          stopLossTarget3m = minLow;
+          calcStopLoss3m = minLow;
       } 
       else if (trend1H.direction === "DOWN" && isDeathCross) {
-          entrySignal3m = "SELL_SIGNAL"; // Death Cross
+          signal3mResult = "SELL_SIGNAL"; // Death Cross
           // Find Highest High in the previous Golden Cross Interval (where 15 > 60)
           let searchIdx = idx - 1;
           let maxHigh = highs3m[idx];
@@ -306,7 +307,7 @@ export const getTradingDecision = async (
               if (highs3m[searchIdx] > maxHigh) maxHigh = highs3m[searchIdx];
               searchIdx--;
           }
-          stopLossTarget3m = maxHigh;
+          calcStopLoss3m = maxHigh;
       }
   }
 
@@ -399,8 +400,8 @@ export const getTradingDecision = async (
 价格: ${currentPrice.toFixed(2)}
 波动: ${dailyChange.toFixed(2)}%
 【1H 趋势】: ${trend1H.description} (时间: ${trend1H.timestamp ? new Date(trend1H.timestamp).toLocaleTimeString() : 'N/A'})
-【3m 信号】: ${entrySignal3m === 'NONE' ? '无新信号' : entrySignal3m}
-【3m 计算止损位】: ${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : '等待信号'}
+【3m 信号】: ${signal3mResult === 'NONE' ? '无新信号' : signal3mResult}
+【3m 计算止损位】: ${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : '等待信号'}
 MACD: ${macdSignalStr}
 RSI: ${rsi14.toFixed(2)}
 `;
@@ -437,20 +438,22 @@ ${positionContext}
 
 2. **入场时机 (Entry)**:
    - **必须在 1H 趋势方向上操作**。
-   - **做多 (Long)**: 1H趋势为 UP，且 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。当前是否触发: ${entrySignal3m === 'BUY_SIGNAL' ? 'YES' : 'NO'}。
-   - **做空 (Short)**: 1H趋势为 DOWN，且 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。当前是否触发: ${entrySignal3m === 'SELL_SIGNAL' ? 'YES' : 'NO'}。
+   - **做多 (Long)**: 1H趋势为 UP，且 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。当前是否触发: ${signal3mResult === 'BUY_SIGNAL' ? 'YES' : 'NO'}。
+   - **做空 (Short)**: 1H趋势为 DOWN，且 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。当前是否触发: ${signal3mResult === 'SELL_SIGNAL' ? 'YES' : 'NO'}。
    - 如果满足条件，在收盘后立即开仓。
 
 3. **止损 (Ratchet Mechanism)**:
    - 始终使用硬止损 (Algo Order)。
-   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : 'N/A'})。
-   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : 'N/A'})。
+   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : 'N/A'})。
+   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : 'N/A'})。
    - 随价格有利变动，持续按此逻辑推进 SL。
 
 4. **止盈 (分层 Tiered TP)**:
    - 收益 > 5%: 平仓 50%。
    - 收益 > 10%: 再平仓 30%，并将止损移至盈利 50% 处。
    - 收益 > 15%: 全部平仓。
+   - 下订单时预先设置好止盈参数。
+   - 止盈操作为对应比例和金额的 CLOSE 操作，而不是 BUY 操作。
    - **1H 趋势反转**: 立即全部平仓。
 
 5. **资金管理**:
@@ -479,7 +482,7 @@ ${positionContext}
    - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
    - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
-请基于上述计算结果生成 JSON 决策。
+请输出 JSON 决策。
 `;
 
   const responseSchema = `
