@@ -217,6 +217,9 @@ export const getTradingDecision = async (
 **市场技术面数据**:
 ${marketDataBlock}
 
+**互联网情报**:
+${newsContext}
+
 **四大核心原则 (不可违背)**:
 
 1. **趋势定义 (EMA 4H)**:
@@ -249,11 +252,11 @@ ${marketDataBlock}
    - **循环**: 每盈利 5% 加一次，直到趋势反转 (EMA再次交叉)。
    - **退出**: 一旦 EMA 发生反向交叉，立即平掉所有仓位。
 
+5. **情报整合**: 
+   - 请结合提供的【互联网情报】，在 'hot_events_overview' 字段中简要分析当前市场宏观情绪（利多/利空/中性）及可能影响趋势的重大风险事件。
+
 **当前持仓状态**:
 ${positionContext}
-
-**互联网情报**:
-${newsContext}
 
 **操作指令**:
 - **BUY / SELL**: 开首仓 或 滚仓加码。
@@ -268,6 +271,7 @@ ${newsContext}
   {
     "stage_analysis": "EMA 4H 趋势分析...",
     "market_assessment": "当前是否满足入场(含回调宽容)/滚仓条件...",
+    "hot_events_overview": "结合上方[互联网情报]分析当前市场宏观情绪及潜在风险事件...",
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
       "confidence": "0-100%",
@@ -333,7 +337,10 @@ ${newsContext}
     }
     
     // Fill required fields
-    decision.hot_events_overview = "See reasoning"; 
+    // Ensure news analysis is populated even if AI misses it (though schema enforces it)
+    if (!decision.hot_events_overview) {
+        decision.hot_events_overview = "AI未提供具体情报分析";
+    }
     decision.eth_analysis = `EMA21: ${emaAnalysis.ema21.toFixed(1)}, EMA55: ${emaAnalysis.ema55.toFixed(1)}`;
 
     return decision;
