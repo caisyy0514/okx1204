@@ -1,3 +1,4 @@
+
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext } from "../types";
 import { INSTRUMENT_ID, MOCK_TICKER, CONTRACT_VAL_ETH } from "../constants";
 import CryptoJS from 'crypto-js';
@@ -28,19 +29,6 @@ const getHeaders = (method: string, requestPath: string, body: string = '', conf
   };
 };
 
-// Helper: Extract valid price number from string (e.g. "3100 (approx)" -> "3100")
-const extractPrice = (p: string | undefined): string | null => {
-    if (!p) return null;
-    // Regex to find the first sequence of digits and dots
-    const match = p.match(/[\d.]+/); 
-    if (match) {
-        const val = parseFloat(match[0]);
-        // Ensure it's a valid positive number
-        return !isNaN(val) && val > 0 ? val.toString() : null;
-    }
-    return null;
-};
-
 export const fetchMarketData = async (config: any): Promise<MarketDataCollection> => {
   if (config.isSimulation) {
     return generateMockMarketData();
@@ -50,13 +38,17 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
     const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${INSTRUMENT_ID}`);
     const tickerJson = await tickerRes.json();
     
+    // NEW: Fetch 3m candles for Precise Entry Strategy
+    const candles3mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=3m&limit=100`);
+    const candles3mJson = await candles3mRes.json();
+
     const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=5m&limit=50`);
     const candles5mJson = await candles5mRes.json();
     
     const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=15m&limit=100`);
     const candles15mJson = await candles15mRes.json();
 
-    // NEW: Fetch 1H candles for EMA Strategy
+    // Fetch 1H candles for EMA Trend Strategy
     const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=1H&limit=100`);
     const candles1HJson = await candles1HRes.json();
 
@@ -70,6 +62,7 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 
     return {
       ticker: tickerJson.data[0],
+      candles3m: formatCandles(candles3mJson.data),
       candles5m: formatCandles(candles5mJson.data),
       candles15m: formatCandles(candles15mJson.data),
       candles1H: formatCandles(candles1HJson.data),
@@ -300,10 +293,10 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     // Attach TP/SL (attachAlgoOrds)
     const tpPrice = order.trading_decision?.profit_target;
     const slPrice = order.trading_decision?.stop_loss;
+    const cleanPrice = (p: string | undefined) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0 ? p : null;
 
-    // Use extractPrice to sanitize text inputs from AI
-    const validTp = extractPrice(tpPrice);
-    const validSl = extractPrice(slPrice);
+    const validTp = cleanPrice(tpPrice);
+    const validSl = cleanPrice(slPrice);
 
     if (validTp || validSl) {
         const algoOrder: any = {};
@@ -358,15 +351,10 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
 
         // 2. Place new Algo Order (Conditional Close) FIRST
         // If placing fails, we throw and DO NOT cancel old orders (safeguard)
-        
-        // Clean prices
-        const cleanSL = extractPrice(slPrice);
-        const cleanTP = extractPrice(tpPrice);
-
-        if (cleanSL || cleanTP) {
+        if (slPrice || tpPrice) {
             const path = "/api/v5/trade/order-algo";
             
-            if (cleanSL) {
+            if (slPrice) {
                 const slBody = JSON.stringify({
                     instId,
                     posSide,
@@ -375,7 +363,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                     ordType: 'conditional',
                     sz: size, 
                     reduceOnly: true,
-                    slTriggerPx: cleanSL,
+                    slTriggerPx: slPrice,
                     slOrdPx: '-1' // Market Close
                 });
                 const slHeaders = getHeaders('POST', path, slBody, config);
@@ -384,7 +372,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                 if (slJson.code !== '0') throw new Error(`设置新止损失败: ${slJson.msg}`);
             }
 
-            if (cleanTP) {
+            if (tpPrice) {
                  const tpBody = JSON.stringify({
                     instId,
                     posSide,
@@ -393,7 +381,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
                     ordType: 'conditional',
                     sz: size,
                     reduceOnly: true,
-                    tpTriggerPx: cleanTP,
+                    tpTriggerPx: tpPrice,
                     tpOrdPx: '-1'
                 });
                 const tpHeaders = getHeaders('POST', path, tpBody, config);
@@ -476,11 +464,16 @@ function generateMockMarketData(): MarketDataCollection {
     return candles.reverse();
   };
 
+  const candles1H = generateCandles(100).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
+  // Generate 3m candles for mock
+  const candles3m = generateCandles(100);
+
   return {
     ticker: { ...MOCK_TICKER, last: currentPrice.toFixed(2), ts: now.toString() },
+    candles3m: candles3m,
     candles5m: generateCandles(50),
     candles15m: generateCandles(100),
-    candles1H: generateCandles(100), // Mock 1H
+    candles1H: candles1H,
     fundingRate: "0.0001",
     openInterest: "50000",
     orderbook: [],
