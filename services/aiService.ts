@@ -1,58 +1,9 @@
 
-import { AIDecision, MarketDataCollection, AccountContext, CandleData } from "../types";
+
+import { AIDecision, MarketDataCollection, AccountContext } from "../types";
 import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from "../constants";
 
 // --- Technical Indicator Helpers ---
-
-const calcSMA = (data: number[], period: number): number => {
-  if (data.length < period) return 0;
-  const slice = data.slice(data.length - period);
-  const sum = slice.reduce((a, b) => a + b, 0);
-  return sum / period;
-};
-
-const calcStdDev = (data: number[], period: number): number => {
-  if (data.length < period) return 0;
-  const sma = calcSMA(data, period);
-  const slice = data.slice(data.length - period);
-  const squaredDiffs = slice.map(x => Math.pow(x - sma, 2));
-  const avgSquaredDiff = squaredDiffs.reduce((a, b) => a + b, 0) / period;
-  return Math.sqrt(avgSquaredDiff);
-};
-
-const calcRSI = (prices: number[], period: number = 14): number => {
-  if (prices.length < period + 1) return 50;
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= period; i++) {
-    const change = prices[i] - prices[i - 1];
-    if (change > 0) gains += change;
-    else losses -= change;
-  }
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
-
-  for (let i = period + 1; i < prices.length; i++) {
-      const change = prices[i] - prices[i - 1];
-      const gain = change > 0 ? change : 0;
-      const loss = change < 0 ? -change : 0;
-      avgGain = (avgGain * (period - 1) + gain) / period;
-      avgLoss = (avgLoss * (period - 1) + loss) / period;
-  }
-  
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
-};
-
-const calcEMA = (prices: number[], period: number): number => {
-  if (prices.length < period) return prices[prices.length - 1];
-  const k = 2 / (period + 1);
-  let ema = prices[0];
-  for (let i = 1; i < prices.length; i++) {
-    ema = prices[i] * k + ema * (1 - k);
-  }
-  return ema;
-};
 
 const calcEMAArray = (prices: number[], period: number): number[] => {
   if (prices.length === 0) return [];
@@ -63,49 +14,6 @@ const calcEMAArray = (prices: number[], period: number): number[] => {
     emas.push(val);
   }
   return emas;
-};
-
-const calcMACD = (prices: number[]) => {
-  const shortPeriod = 12;
-  const longPeriod = 26;
-  
-  if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
-  
-  const ema12 = calcEMA(prices.slice(-shortPeriod * 2), shortPeriod); 
-  const ema26 = calcEMA(prices.slice(-longPeriod * 2), longPeriod);
-  
-  const macdLine = ema12 - ema26;
-  const signalLine = macdLine * 0.8; 
-  
-  return { macd: macdLine, signal: signalLine, hist: macdLine - signalLine };
-};
-
-const calcBollinger = (prices: number[], period: number = 20, multiplier: number = 2) => {
-    const mid = calcSMA(prices, period);
-    const std = calcStdDev(prices, period);
-    return {
-        upper: mid + multiplier * std,
-        mid: mid,
-        lower: mid - multiplier * std
-    };
-};
-
-const calcKDJ = (highs: number[], lows: number[], closes: number[], period: number = 9) => {
-    let k = 50, d = 50, j = 50;
-    for (let i = 0; i < closes.length; i++) {
-        if (i < period - 1) continue;
-        let localLow = lows[i];
-        let localHigh = highs[i];
-        for (let x = 0; x < period; x++) {
-             if (lows[i-x] < localLow) localLow = lows[i-x];
-             if (highs[i-x] > localHigh) localHigh = highs[i-x];
-        }
-        const rsv = (localHigh === localLow) ? 50 : ((closes[i] - localLow) / (localHigh - localLow)) * 100;
-        k = (2/3) * k + (1/3) * rsv;
-        d = (2/3) * d + (1/3) * k;
-        j = 3 * k - 2 * d;
-    }
-    return { k, d, j };
 };
 
 // --- DeepSeek API Helper ---
@@ -130,7 +38,7 @@ const callDeepSeek = async (apiKey: string, messages: any[]) => {
                 model: "deepseek-chat",
                 messages: messages,
                 stream: false,
-                temperature: 1.0, 
+                temperature: 0.8, // Slightly lower temp for strict logic
                 max_tokens: 4096,
                 response_format: { type: 'json_object' }
             })
@@ -192,322 +100,187 @@ export const getTradingDecision = async (
 
   // --- 1. 数据准备 (Data Prep) ---
   const currentPrice = parseFloat(marketData.ticker?.last || "0");
-  const open24h = parseFloat(marketData.ticker?.open24h || "0");
   const totalEquity = parseFloat(accountData.balance.totalEq);
   const availableEquity = parseFloat(accountData.balance.availEq);
-  const sharpeRatio = accountData.sharpeRatio || 0; 
 
-  // K-Line Data Arrays (15m for short term indicators)
-  const candles = marketData.candles15m || [];
-  const closes = candles.map(c => parseFloat(c.c));
-  const highs = candles.map(c => parseFloat(c.h));
-  const lows = candles.map(c => parseFloat(c.l));
-
-  // --- 2. 指标计算 (Indicators) ---
-  const dailyChange = open24h > 0 ? ((currentPrice - open24h) / open24h) * 100 : 0;
+  // Core Data: 4H Candles
+  const candles4H = marketData.candles4H || [];
   
-  // Trend & Momentum (Auxiliary)
-  const macdData = calcMACD(closes);
-  const macdSignalStr = macdData.hist > 0 ? "多头趋势 (MACD > Signal)" : "空头趋势 (MACD < Signal)";
-  
-  const boll = calcBollinger(closes, 20, 2);
-  let bollPosStr = "中轨附近";
-  if (currentPrice > boll.upper) bollPosStr = "突破上轨 (超买/强势)";
-  else if (currentPrice < boll.lower) bollPosStr = "跌破下轨 (超卖/弱势)";
-  else if (currentPrice > boll.mid) bollPosStr = "中轨上方 (偏多)";
-  else bollPosStr = "中轨下方 (偏空)";
-
-  const rsi14 = calcRSI(closes, 14);
-
-  // --- 3. 核心：1小时级别 EMA 趋势判断 (EMA15 vs EMA60) ---
-  const candles1H = marketData.candles1H || [];
-  let trend1H = {
-      direction: "NEUTRAL",
-      timestamp: 0,
-      description: "震荡/无明确趋势"
+  // --- 2. 核心指标计算 (EMA 21/55 on 4H) ---
+  let emaAnalysis = {
+      ema21: 0,
+      ema55: 0,
+      trend: "NEUTRAL",
+      isGoldenCross: false,
+      isDeathCross: false,
+      signalCandleColor: "NEUTRAL", // 'GREEN' or 'RED'
+      prevHigh: 0,
+      prevLow: 0
   };
-  
-  if (candles1H.length > 60) {
-      const closes1H = candles1H.map(c => parseFloat(c.c));
-      const latestCandle = candles1H[candles1H.length - 1];
-      const latestClose1H = parseFloat(latestCandle.c);
-      const latestOpen1H = parseFloat(latestCandle.o);
-      
-      const ema15_1H = calcEMA(closes1H, 15);
-      const ema60_1H = calcEMA(closes1H, 60);
-      
-      const isUpCross = ema15_1H > ema60_1H; 
-      const isYang = latestClose1H > latestOpen1H; // Green Candle
-      const isYin = latestClose1H < latestOpen1H; // Red Candle
 
-      if (isUpCross && isYang) {
-          trend1H = { 
-              direction: "UP", 
-              timestamp: parseInt(latestCandle.ts), 
-              description: `UP (EMA15>60 & 收阳)` 
-          };
-      } else if (!isUpCross && isYin) {
-          trend1H = { 
-              direction: "DOWN", 
-              timestamp: parseInt(latestCandle.ts), 
-              description: `DOWN (EMA15<60 & 收阴)` 
-          };
-      } else {
-          trend1H.description = isUpCross ? "震荡偏多 (EMA多头但收阴)" : "震荡偏空 (EMA空头但收阳)";
-          trend1H.timestamp = parseInt(latestCandle.ts);
-      }
+  if (candles4H.length > 60) {
+      const closes4H = candles4H.map(c => parseFloat(c.c));
+      const ema21Arr = calcEMAArray(closes4H, 21);
+      const ema55Arr = calcEMAArray(closes4H, 55);
+      
+      const lastIdx = closes4H.length - 1; 
+      // Current (Last Closed) Candle values
+      const currEma21 = ema21Arr[lastIdx];
+      const currEma55 = ema55Arr[lastIdx];
+      const prevEma21 = ema21Arr[lastIdx - 1];
+      const prevEma55 = ema55Arr[lastIdx - 1];
+      
+      const lastCandle = candles4H[lastIdx];
+      const close = parseFloat(lastCandle.c);
+      const open = parseFloat(lastCandle.o);
+      
+      emaAnalysis.ema21 = currEma21;
+      emaAnalysis.ema55 = currEma55;
+      emaAnalysis.trend = currEma21 > currEma55 ? "BULLISH" : "BEARISH";
+      
+      // Cross Detection (Happened on the latest closed candle)
+      emaAnalysis.isGoldenCross = (prevEma21 <= prevEma55) && (currEma21 > currEma55);
+      emaAnalysis.isDeathCross = (prevEma21 >= prevEma55) && (currEma21 < currEma55);
+      
+      emaAnalysis.signalCandleColor = close >= open ? "GREEN" : "RED";
+      
+      // Previous Candle High/Low (for Stop Loss) based on the candle BEFORE the signal (or the signal candle itself?)
+      // Spec says: "Stop loss placed at High/Low of previous 4H candle".
+      // Relative to a potential entry NOW, the "previous" candle is the last closed candle (index lastIdx).
+      // Or strictly the one before that. Let's use the last closed candle's High/Low as strict reference.
+      emaAnalysis.prevHigh = parseFloat(lastCandle.h);
+      emaAnalysis.prevLow = parseFloat(lastCandle.l);
   }
 
-  // --- 4. 核心：3分钟图 入场/出场信号 (Entry/Exit Signals) ---
-  // RENAMED VARIABLES TO PREVENT 'entry3m is not defined' ERROR
-  const candles3m = marketData.candles3m || [];
-  let signal3mResult = "NONE"; // 'BUY_SIGNAL' | 'SELL_SIGNAL' | 'NONE'
-  let calcStopLoss3m = 0;
-  
-  if (candles3m.length > 65) {
-      const closes3m = candles3m.map(c => parseFloat(c.c));
-      const lows3m = candles3m.map(c => parseFloat(c.l));
-      const highs3m = candles3m.map(c => parseFloat(c.h));
-      
-      // Calculate full EMA arrays to look back for crossovers
-      const ema15Array = calcEMAArray(closes3m, 15);
-      const ema60Array = calcEMAArray(closes3m, 60);
-      
-      const idx = closes3m.length - 1; // Current Candle Index
-      
-      // Detect Golden Cross (EMA15 crosses above EMA60)
-      // Check: Prev (15 <= 60) -> Curr (15 > 60)
-      const isGoldenCross = (ema15Array[idx] > ema60Array[idx]) && (ema15Array[idx-1] <= ema60Array[idx-1]);
-      
-      // Detect Death Cross (EMA15 crosses below EMA60)
-      // Check: Prev (15 >= 60) -> Curr (15 < 60)
-      const isDeathCross = (ema15Array[idx] < ema60Array[idx]) && (ema15Array[idx-1] >= ema60Array[idx-1]);
-
-      if (trend1H.direction === "UP" && isGoldenCross) {
-          signal3mResult = "BUY_SIGNAL"; // Golden Cross
-          // Find Lowest Low in the previous Death Cross Interval (where 15 < 60)
-          let searchIdx = idx - 1;
-          let minLow = lows3m[idx];
-          // Look back max 50 candles
-          while(searchIdx > 0 && (idx - searchIdx) < 50) {
-              if (ema15Array[searchIdx] > ema60Array[searchIdx]) break; // End of death cross interval (start of prev golden)
-              if (lows3m[searchIdx] < minLow) minLow = lows3m[searchIdx];
-              searchIdx--;
-          }
-          calcStopLoss3m = minLow;
-      } 
-      else if (trend1H.direction === "DOWN" && isDeathCross) {
-          signal3mResult = "SELL_SIGNAL"; // Death Cross
-          // Find Highest High in the previous Golden Cross Interval (where 15 > 60)
-          let searchIdx = idx - 1;
-          let maxHigh = highs3m[idx];
-           // Look back max 50 candles
-          while(searchIdx > 0 && (idx - searchIdx) < 50) {
-              if (ema15Array[searchIdx] < ema60Array[searchIdx]) break; // End of golden cross interval
-              if (highs3m[searchIdx] > maxHigh) maxHigh = highs3m[searchIdx];
-              searchIdx--;
-          }
-          calcStopLoss3m = maxHigh;
-      }
-  }
-
-  // --- 5. 持仓分析与分层止盈 (Position Analysis & Tiered TP) ---
+  // --- 3. 持仓分析 (Position Analysis) ---
   const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
-  
-  let stageName = "";
-  let currentStageParams = null;
-
-  if (totalEquity < 20) {
-      stageName = STRATEGY_STAGES.STAGE_1.name;
-      currentStageParams = STRATEGY_STAGES.STAGE_1;
-  } else if (totalEquity < 80) {
-      stageName = STRATEGY_STAGES.STAGE_2.name;
-      currentStageParams = STRATEGY_STAGES.STAGE_2;
-  } else {
-      stageName = STRATEGY_STAGES.STAGE_3.name;
-      currentStageParams = STRATEGY_STAGES.STAGE_3;
-  }
-
   const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
-  let positionContext = "当前无持仓";
-  let breakevenPrice = 0;
-  let netPnL = 0;
-  let estimatedTotalFees = 0;
-  let tpAdvice = "暂无";
   
+  let netPnL = 0;
+  let uplRatio = 0;
+  let rollingTrigger = false;
+  let positionContext = "当前无持仓";
+
   if (hasPosition) {
       const p = primaryPosition!;
       const sizeContracts = parseFloat(p.pos);
       const sizeCoin = sizeContracts * CONTRACT_VAL_ETH;
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
-      const uplRatio = parseFloat(p.uplRatio);
+      uplRatio = parseFloat(p.uplRatio);
       
-      // Strict Breakeven Calculation
-      let localBreakeven = 0;
-      if (p.posSide === 'long') {
-          localBreakeven = entryPrice * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
-      } else {
-          localBreakeven = entryPrice * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
-      }
-      const exchangeBreakeven = parseFloat(p.breakEvenPx || "0");
-      breakevenPrice = exchangeBreakeven > 0 ? exchangeBreakeven : localBreakeven;
-      
-      // Net Profit
       const currentVal = sizeCoin * currentPrice;
       const entryVal = sizeCoin * entryPrice;
-      estimatedTotalFees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
-      netPnL = upl - estimatedTotalFees;
+      const fees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
+      netPnL = upl - fees;
 
-      // Tiered Take Profit Logic
-      if (uplRatio > 0.15) tpAdvice = "触发 15% 止盈线: 建议全部平仓";
-      else if (uplRatio > 0.10) tpAdvice = "触发 10% 止盈线: 平仓 30%, 止损移至 +5% 处";
-      else if (uplRatio > 0.05) tpAdvice = "触发 5% 止盈线: 平仓 50%";
-      else tpAdvice = "持有中 (收益 < 5%)";
-      
-      // 1H Trend Reversal Check
-      if (p.posSide === 'long' && trend1H.direction === 'DOWN') tpAdvice += " [警告] 1H 趋势反转 (变为DOWN), 建议立即全平";
-      if (p.posSide === 'short' && trend1H.direction === 'UP') tpAdvice += " [警告] 1H 趋势反转 (变为UP), 建议立即全平";
+      // Rolling Logic Trigger: Profit > 5%
+      // Note: uplRatio is a good proxy. 0.05 = 5%.
+      if (uplRatio >= 0.05) {
+          rollingTrigger = true;
+      }
 
       positionContext = `
       === 持仓详情 ===
       方向: ${p.posSide.toUpperCase()}
-      持仓量: ${p.pos} 张 (${sizeCoin.toFixed(2)} ETH)
+      持仓量: ${p.pos} 张
       开仓均价: ${entryPrice.toFixed(2)}
-      当前市价: ${currentPrice.toFixed(2)}
+      浮盈比例: ${(uplRatio * 100).toFixed(2)}%
+      净利润: ${netPnL.toFixed(2)} U
       
-      === 盈亏分析 (Net Profit) ===
-      浮动盈亏 (UPL): ${upl.toFixed(2)} U (${(uplRatio*100).toFixed(2)}%)
-      预估双边手续费: ${estimatedTotalFees.toFixed(2)} U
-      【净利润】: ${netPnL.toFixed(2)} U
-      
-      === 保护锚点 ===
-      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)}
-      当前止损 (SL): ${p.slTriggerPx || "未设置"}
-      当前止盈 (TP): ${p.tpTriggerPx || "未设置"}
-      
-      === 分层止盈建议 ===
-      ${tpAdvice}
+      === 滚仓状态 ===
+      是否满足加仓条件 (Profit > 5%): ${rollingTrigger ? "YES (建议加仓)" : "NO"}
       `;
   }
 
-  // --- NEW: Perform "Internet Search" (Fetch Real-time News) ---
+  // --- 4. 构建 Prompt (The New 4 Rules) ---
+  
+  // Real-time News
   const newsContext = await fetchRealTimeNews();
 
-  // --- 6. 构建 Prompt (Strategy Update) ---
-  
   const marketDataBlock = `
-价格: ${currentPrice.toFixed(2)}
-波动: ${dailyChange.toFixed(2)}%
-【1H 趋势】: ${trend1H.description} (时间: ${trend1H.timestamp ? new Date(trend1H.timestamp).toLocaleTimeString() : 'N/A'})
-【3m 信号】: ${signal3mResult === 'NONE' ? '无新信号' : signal3mResult}
-【3m 计算止损位】: ${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : '等待信号'}
-MACD: ${macdSignalStr}
-RSI: ${rsi14.toFixed(2)}
-`;
-
-  const performanceBlock = `
-【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
-- Sharpe < 0: 平均亏损 -> 若计划开仓或补仓，强制大幅降低仓位。
+当前价格: ${currentPrice.toFixed(2)}
+【EMA指标 (4H)】
+- EMA21: ${emaAnalysis.ema21.toFixed(2)}
+- EMA55: ${emaAnalysis.ema55.toFixed(2)}
+- EMA趋势方向: ${emaAnalysis.trend}
+- 当前交叉状态: ${emaAnalysis.isGoldenCross ? "金叉 (Golden Cross)" : emaAnalysis.isDeathCross ? "死叉 (Death Cross)" : "趋势延续中(无新交叉)"}
+- 最新K线颜色: ${emaAnalysis.signalCandleColor} (Close ${emaAnalysis.signalCandleColor === 'GREEN' ? '>' : '<'} Open)
+- 前K高点: ${emaAnalysis.prevHigh}
+- 前K低点: ${emaAnalysis.prevLow}
 `;
 
   const systemPrompt = `
-你是一名精通 **ETH 合约交易** 专家。
-你的首要任务是执行 **保护本金的情况下最大化盈利** 。
-你具备 **实时联网搜索能力**，必须结合下方的【实时互联网情报】进行综合研判。
+你是一个严格执行 **EMA趋势策略** 的交易机器人。
+你 **必须** 忽略所有其他指标（RSI, MACD, Bollinger等），仅关注 **EMA21** 和 **EMA55** 的 **4H** 走势。
 
-**当前环境**:
-- 阶段: ${stageName} (基础杠杆 ${currentStageParams.leverage}x)
-- 市场: ${marketDataBlock}
-- 绩效: ${performanceBlock}
+**四大核心原则 (不可违背)**:
 
-**实时互联网情报**:
-${newsContext}
+1. **趋势定义 (EMA 4H)**:
+   - 依据: EMA21 (短期) 和 EMA55 (长期) 在 **4小时** 级别图表上的关系。
+   - 趋势判断: EMA21 > EMA55 为多头 (BULLISH); EMA21 < EMA55 为空头 (BEARISH)。
 
-**持仓状态**:
+2. **入场时机 (Entry Rules - 宽容模式)**:
+   *鉴于4H K线时间跨度大，不要因错过交叉瞬间而放弃良好趋势。*
+   - **做多 (Long)**: 
+     - 基础条件: EMA21 > EMA55 (趋势向上)。
+     - 触发时机 A: 刚刚发生金叉 (Golden Cross) 且 K线收阳。
+     - 触发时机 B (宽容): 趋势已确立，但价格回调至 EMA21 附近 (Pullback Support) 且未跌破 EMA55。
+     - 触发时机 C (宽容): 金叉发生后的 1-3 根K线内，价格处于合理区间，未过度偏离 (无暴涨追高嫌疑)。
+   
+   - **做空 (Short)**: 
+     - 基础条件: EMA21 < EMA55 (趋势向下)。
+     - 触发时机 A: 刚刚发生死叉 (Death Cross) 且 K线收阴。
+     - 触发时机 B (宽容): 趋势已确立，但价格反弹至 EMA21 附近 (Pullback Resistance) 且未突破 EMA55。
+     - 触发时机 C (宽容): 死叉发生后的 1-3 根K线内，价格处于合理区间，未过度偏离 (无暴跌追低嫌疑)。
+
+3. **止损坚决带好 (Stop Loss)**:
+   - **位置**: 必须设在前一根 4H K线的 高点(空单SL) 或 低点(多单SL)。
+   - **多单 SL**: ${emaAnalysis.prevLow}
+   - **空单 SL**: ${emaAnalysis.prevHigh}
+   - **风控**: 单笔亏损不得超过总本金的 5%。如果计算出的 SL 导致亏损 > 5%，必须减少开仓数量。
+
+4. **"滚仓式"加码 (Rolling)**:
+   - **首仓**: 资金的 5%。
+   - **加码**: 当持仓盈利达到 5% 时，立即加仓 (使用另外 5% 资金)。
+   - **循环**: 每盈利 5% 加一次，直到趋势反转 (EMA再次交叉)。
+   - **退出**: 一旦 EMA 发生反向交叉，立即平掉所有仓位。
+
+**当前持仓状态**:
 ${positionContext}
 
----
-
-**核心策略规则 (Strict Rules)**:
-
-1. **1H 趋势判断 (Trend)**:
-   - 必须严格遵循上方提供的 【1H 趋势】 信号。
-   - UP = EMA15 > EMA60 且 K线阳线。
-   - DOWN = EMA15 < EMA60 且 K线阴线。
-
-2. **入场时机 (Entry)**:
-   - **必须在 1H 趋势方向上操作**。
-   - **做多 (Long)**: 1H趋势为 UP，且 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。当前是否触发: ${signal3mResult === 'BUY_SIGNAL' ? 'YES' : 'NO'}。
-   - **做空 (Short)**: 1H趋势为 DOWN，且 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。当前是否触发: ${signal3mResult === 'SELL_SIGNAL' ? 'YES' : 'NO'}。
-   - 如果满足条件，在收盘后立即开仓。
-
-3. **止损 (Ratchet Mechanism)**:
-   - 始终使用硬止损 (Algo Order)。
-   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : 'N/A'})。
-   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${calcStopLoss3m > 0 ? calcStopLoss3m.toFixed(2) : 'N/A'})。
-   - 随价格有利变动，持续按此逻辑推进 SL。
-
-4. **止盈 (分层 Tiered TP)**:
-   - 收益 > 5%: 平仓 50%。
-   - 收益 > 10%: 再平仓 30%，并将止损移至盈利 50% 处。
-   - 收益 > 15%: 全部平仓。
-   - 下订单时预先设置好止盈参数。
-   - 止盈操作为对应比例和金额的 CLOSE 操作，而不是 BUY 操作。
-   - **1H 趋势反转**: 立即全部平仓。
-
-5. **资金管理**:
-   - **首仓**: 30% 权益。
-   - **补仓 (Smart DCA)**: 触发条件为浮亏+支撑位+逻辑未坏。单次补仓仅使用剩余资金的 10%-30%。循序渐进。
-   - 夏普比率 < 0 时，进一步降低开仓规模。
-
-6. **锚点战术**:
-   - **Breakeven Price** 是最重要的战场分界线。
-   - 战术路径：触达 Breakeven -> 确保 SL 尽快跨越 Breakeven 线 -> 开启无限追利。
-
-7. **核心目标**:
-   - 一切决策以 **净利润 (Net Profit)** 为核心。
+**互联网情报**:
+${newsContext}
 
 **操作指令**:
-- **UPDATE_TPSL**: 调整止损止盈 (最常用)。
-- **BUY / SELL**: 开仓或加仓/补仓。
-- **CLOSE**: 立即市价全平。
-- **HOLD**: 暂时不动。
-
-**输出要求**:
-1. 返回格式必须为 JSON。
-2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
-3. **hot_events_overview** 字段：请仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
-4. **market_assessment** 字段：必须明确包含以下两行结论：
-   - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
-   - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
+- **BUY / SELL**: 开首仓 或 滚仓加码。
+- **CLOSE**: 趋势反转全平。
+- **UPDATE_TPSL**: 仅用于移动止损，严禁取消止损。
+- **HOLD**: 无信号、趋势不明或持仓未达加码标准。
 
 请输出 JSON 决策。
 `;
 
   const responseSchema = `
   {
-    "stage_analysis": "简述...",
-    "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
-    "market_assessment": "重点点评 1H 趋势与 3m 信号...",
-    "eth_analysis": "...", 
+    "stage_analysis": "EMA 4H 趋势分析...",
+    "market_assessment": "当前是否满足入场(含回调宽容)/滚仓条件...",
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
       "confidence": "0-100%",
-      "position_size": "数量(张), 仅在BUY/SELL时有效",
-      "leverage": "${currentStageParams.leverage}",
-      "profit_target": "按分层止盈逻辑，通常留空由系统监控，除非全平",
-      "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
-      "invalidation_condition": "..."
+      "position_size": "数量(张) 或 留空由代码计算",
+      "leverage": "20", 
+      "stop_loss": "必须填入前K高低点",
+      "profit_target": "0"
     },
-    "reasoning": "解释是否符合 1H 趋势？3m 信号是否触发？止损位如何计算？"
+    "reasoning": "严格基于四大原则解释原因"
   }
   `;
 
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY:\n" + responseSchema },
-        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据新版策略及实时情报给出最佳操作。` }
+        { role: "user", content: `账户总权益: ${totalEquity} U。可用: ${availableEquity} U。请给出操作。` }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
@@ -521,111 +294,44 @@ ${positionContext}
         throw new Error("AI 返回格式错误");
     }
 
-    // --- Post-Processing & Safety Checks ---
     decision.action = decision.trading_decision.action.toUpperCase() as any;
     
-    // Safety Check: Ratchet Mechanism Enforcement (System Override)
-    // 强制执行棘轮机制，防止 AI 幻觉导致止损变宽
-    if (decision.action === 'UPDATE_TPSL' && hasPosition) {
-        const p = primaryPosition!;
-        const newSL = parseFloat(decision.trading_decision.stop_loss);
-        const currentSL = parseFloat(p.slTriggerPx || "0");
-        
-        if (!isNaN(newSL) && newSL > 0 && currentSL > 0) {
-            // Rule: Only move towards higher profit
-            if (p.posSide === 'long') {
-                if (newSL < currentSL) {
-                    console.warn(`[Ratchet Guard] 拦截无效指令: 多单止损不能下移 (${currentSL} -> ${newSL})`);
-                    decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 违反棘轮机制，禁止降低多单止损]";
-                }
-            } else if (p.posSide === 'short') {
-                if (newSL > currentSL) {
-                    console.warn(`[Ratchet Guard] 拦截无效指令: 空单止损不能上移 (${currentSL} -> ${newSL})`);
-                    decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 违反棘轮机制，禁止提高空单止损]";
-                }
-            }
-        }
-    }
-
-    // Standard sizing logic logic...
-    const leverage = parseFloat(decision.trading_decision.leverage);
-    const safeLeverage = isNaN(leverage) ? currentStageParams.leverage : leverage;
+    // --- 资金管理逻辑 (Code Logic Override for Safety) ---
+    // Rule: Initial 5% of Equity. Rolling 5% of Equity.
+    const targetMargin = totalEquity * 0.05; // 5% of Total Equity
+    const leverage = 20; // Standardize leverage for this strategy to sensible level or user config
     
-    // Auto-fix sizing for BUY/SELL
+    // Calculate contracts for 5% equity
+    const priceForCalc = currentPrice > 0 ? currentPrice : 1;
+    const contractVal = CONTRACT_VAL_ETH * priceForCalc; // Value of 1 contract in USDT
+    const targetPosValue = targetMargin * leverage;
+    const targetContracts = targetPosValue / contractVal;
+    
     if (decision.action === 'BUY' || decision.action === 'SELL') {
-        const isAdding = hasPosition; // DCA or Pyramiding
+        // Enforce 5% sizing
+        decision.size = Math.max(targetContracts, 0.01).toFixed(2);
+        decision.leverage = leverage.toString();
         
-        // --- 核心资金管理 (修正版) ---
-        // 1. 若为加仓/补仓：使用可用余额的 10%-30%
-        // 2. 若为首次开仓：使用可用余额的 30%
-
-        // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
-        let sharpeModifier = 1.0;
-        if (sharpeRatio < 0) {
-            sharpeModifier = 0.5; // Cut size in half if performance is bad
-        }
-
-        // 1. Determine Target Contracts from Algo
-        const priceForCalc = currentPrice > 0 ? currentPrice : 1; 
-        
-        // Calculate Base Margin based on Strategy
-        let baseRiskRatio = 0;
-        if (isAdding) {
-            baseRiskRatio = 0.15; // DCA use ~15% (Range 10-30%)
-        } else {
-            baseRiskRatio = 0.30; // Initial Entry use 30%
-        }
-        
-        // Apply Sharpe Modifier to Risk Ratio
-        const effectiveRiskRatio = baseRiskRatio * sharpeModifier;
-        const marginToUse = availableEquity * effectiveRiskRatio;
-        const posValue = marginToUse * safeLeverage;
-        const algoContracts = posValue / (CONTRACT_VAL_ETH * priceForCalc);
-
-        // 2. Process AI Suggestion
-        let finalContracts = 0;
-        let aiContracts = 0;
-        
-        if (decision.trading_decision.position_size && decision.trading_decision.position_size !== "0") {
-             aiContracts = parseFloat(decision.trading_decision.position_size);
-        }
-
-        // 3. Decision Logic: AI vs Algo
-        // If AI gives valid number, verify it against cap.
-        if (aiContracts > 0 && !isNaN(aiContracts)) {
-             finalContracts = aiContracts;
-        } else {
-             finalContracts = algoContracts;
-        }
-
-        // 4. Calculate Max Available Contracts (Safety Cap)
-        // Hard Cap: Initial Trade Max 30%, DCA Max 30% of current available
-        const capRatio = 0.30; 
-        const maxMarginCap = availableEquity * capRatio;
-        const maxPosValueCap = maxMarginCap * safeLeverage;
-        const maxContractsCap = maxPosValueCap / (CONTRACT_VAL_ETH * priceForCalc);
-
-        if (finalContracts > maxContractsCap) {
-            console.warn(`[Risk Control] Size ${finalContracts.toFixed(2)} exceeds cap. Limited to ${maxContractsCap.toFixed(2)}`);
-            decision.reasoning += ` [资金管控: 仓位限制在余额的 ${(capRatio*100).toFixed(0)}% (${maxContractsCap.toFixed(2)}张)]`;
-            finalContracts = maxContractsCap;
-        }
-
-        decision.size = Math.max(finalContracts, 0.01).toFixed(2);
-        decision.leverage = safeLeverage.toString();
-
-        // Final check
-        if (parseFloat(decision.size) < 0.01 || isNaN(parseFloat(decision.size))) {
-             decision.action = 'HOLD';
-             decision.size = "0";
-             decision.reasoning += " [系统拦截: 账户余额不足以开出最小仓位]";
+        // Rolling Logic Check
+        if (hasPosition) {
+            // If AI says BUY/SELL while holding, it must be rolling or reversing
+            // If reversing, AI should say CLOSE + OPEN (Complex, but let's assume CLOSE first then next tick OPEN)
+            // If Rolling:
+            if (!rollingTrigger) {
+                 // Prevent adding if profit < 5%
+                 console.warn("AI attempted to add position but profit < 5%. Forcing HOLD.");
+                 decision.action = 'HOLD';
+                 decision.reasoning += " [系统拦截: 未达 5% 盈利加仓标准]";
+            }
         }
     } else {
         decision.size = "0";
-        decision.leverage = safeLeverage.toString();
+        decision.leverage = leverage.toString();
     }
+    
+    // Fill required fields
+    decision.hot_events_overview = "See reasoning"; 
+    decision.eth_analysis = `EMA21: ${emaAnalysis.ema21.toFixed(1)}, EMA55: ${emaAnalysis.ema55.toFixed(1)}`;
 
     return decision;
 
