@@ -60,7 +60,7 @@ const calcEMA = (prices: number[], period: number): number => {
   return ema;
 };
 
-// EMA Array Calculator
+// EMA Array Calculator (for crossovers)
 const calcEMAArray = (prices: number[], period: number): number[] => {
   if (prices.length === 0) return [];
   const k = 2 / (period + 1);
@@ -218,7 +218,7 @@ export const getTradingDecision = async (
   const open24h = parseFloat(marketData.ticker?.open24h || "0");
   const totalEquity = parseFloat(accountData.balance.totalEq);
   const availableEquity = parseFloat(accountData.balance.availEq);
-  const sharpeRatio = accountData.sharpeRatio || 0; // Performance Metric
+  const sharpeRatio = accountData.sharpeRatio || 0; 
 
   // K-Line Data Arrays (15m for short term indicators)
   const candles = marketData.candles15m || [];
@@ -229,7 +229,7 @@ export const getTradingDecision = async (
   // --- 2. 指标计算 (Indicators) ---
   const dailyChange = open24h > 0 ? ((currentPrice - open24h) / open24h) * 100 : 0;
   
-  // Trend & Momentum
+  // Trend & Momentum (Auxiliary)
   const macdData = calcMACD(closes);
   const macdSignalStr = macdData.hist > 0 ? "多头趋势 (MACD > Signal)" : "空头趋势 (MACD < Signal)";
   
@@ -241,23 +241,20 @@ export const getTradingDecision = async (
   else bollPosStr = "中轨下方 (偏空)";
 
   const rsi14 = calcRSI(closes, 14);
-  const kdj = calcKDJ(highs, lows, closes, 9);
-  let kdjSignalStr = "观望";
-  if (kdj.k > 80 && kdj.d > 80) kdjSignalStr = "超买 (死叉预警)";
-  else if (kdj.k < 20 && kdj.d < 20) kdjSignalStr = "超卖 (金叉预警)";
-  else if (kdj.k > kdj.d) kdjSignalStr = "金叉向上";
-  else kdjSignalStr = "死叉向下";
 
   // --- 3. 核心：1小时级别 EMA 趋势判断 (EMA15 vs EMA60) ---
   const candles1H = marketData.candles1H || [];
-  let emaTrend1H = "NEUTRAL";
-  let emaTrendStr = "震荡/无明确趋势";
+  let trend1H = {
+      direction: "NEUTRAL",
+      timestamp: 0,
+      description: "震荡/无明确趋势"
+  };
   
   if (candles1H.length > 60) {
       const closes1H = candles1H.map(c => parseFloat(c.c));
-      const latestClose1H = closes1H[closes1H.length - 1];
-      const latestOpen1H = parseFloat(candles1H[candles1H.length - 1].o);
-      const latestTime1H = new Date(parseInt(candles1H[candles1H.length - 1].ts)).toLocaleTimeString();
+      const latestCandle = candles1H[candles1H.length - 1];
+      const latestClose1H = parseFloat(latestCandle.c);
+      const latestOpen1H = parseFloat(latestCandle.o);
       
       const ema15_1H = calcEMA(closes1H, 15);
       const ema60_1H = calcEMA(closes1H, 60);
@@ -267,19 +264,26 @@ export const getTradingDecision = async (
       const isYin = latestClose1H < latestOpen1H; // Red Candle
 
       if (isUpCross && isYang) {
-          emaTrend1H = "UP";
-          emaTrendStr = `UP (EMA15>60 & 收阳) @ ${latestTime1H}`;
+          trend1H = { 
+              direction: "UP", 
+              timestamp: parseInt(latestCandle.ts), 
+              description: `UP (EMA15>60 & 收阳)` 
+          };
       } else if (!isUpCross && isYin) {
-          emaTrend1H = "DOWN";
-          emaTrendStr = `DOWN (EMA15<60 & 收阴) @ ${latestTime1H}`;
+          trend1H = { 
+              direction: "DOWN", 
+              timestamp: parseInt(latestCandle.ts), 
+              description: `DOWN (EMA15<60 & 收阴)` 
+          };
       } else {
-          emaTrendStr = isUpCross ? "震荡偏多 (EMA多头但收阴)" : "震荡偏空 (EMA空头但收阳)";
+          trend1H.description = isUpCross ? "震荡偏多 (EMA多头但收阴)" : "震荡偏空 (EMA空头但收阳)";
+          trend1H.timestamp = parseInt(latestCandle.ts);
       }
   }
 
   // --- 4. 核心：3分钟图 入场/出场信号 (Entry/Exit Signals) ---
   const candles3m = marketData.candles3m || [];
-  let entrySignal3m = "NONE";
+  let entrySignal3m = "NONE"; // 'BUY_SIGNAL' | 'SELL_SIGNAL' | 'NONE'
   let stopLossTarget3m = 0;
   
   if (candles3m.length > 65) {
@@ -294,27 +298,27 @@ export const getTradingDecision = async (
       const idx = closes3m.length - 1; // Current Candle Index
       
       // Detect Golden Cross (EMA15 crosses above EMA60)
-      // Check last 3 candles for fresh cross
-      // Cross happens if prev: 15 < 60 AND curr: 15 > 60
+      // Check: Prev (15 <= 60) -> Curr (15 > 60)
       const isGoldenCross = (ema15Array[idx] > ema60Array[idx]) && (ema15Array[idx-1] <= ema60Array[idx-1]);
       
       // Detect Death Cross (EMA15 crosses below EMA60)
+      // Check: Prev (15 >= 60) -> Curr (15 < 60)
       const isDeathCross = (ema15Array[idx] < ema60Array[idx]) && (ema15Array[idx-1] >= ema60Array[idx-1]);
 
-      if (isGoldenCross) {
+      if (trend1H.direction === "UP" && isGoldenCross) {
           entrySignal3m = "BUY_SIGNAL"; // Golden Cross
           // Find Lowest Low in the previous Death Cross Interval (where 15 < 60)
           let searchIdx = idx - 1;
           let minLow = lows3m[idx];
           // Look back max 50 candles
           while(searchIdx > 0 && (idx - searchIdx) < 50) {
-              if (ema15Array[searchIdx] > ema60Array[searchIdx]) break; // End of death cross interval
+              if (ema15Array[searchIdx] > ema60Array[searchIdx]) break; // End of death cross interval (start of prev golden)
               if (lows3m[searchIdx] < minLow) minLow = lows3m[searchIdx];
               searchIdx--;
           }
           stopLossTarget3m = minLow;
       } 
-      else if (isDeathCross) {
+      else if (trend1H.direction === "DOWN" && isDeathCross) {
           entrySignal3m = "SELL_SIGNAL"; // Death Cross
           // Find Highest High in the previous Golden Cross Interval (where 15 > 60)
           let searchIdx = idx - 1;
@@ -384,8 +388,8 @@ export const getTradingDecision = async (
       else tpAdvice = "持有中 (收益 < 5%)";
       
       // 1H Trend Reversal Check
-      if (p.posSide === 'long' && emaTrend1H === 'DOWN') tpAdvice += " [警告] 1H 趋势反转 (变为DOWN), 建议立即全平";
-      if (p.posSide === 'short' && emaTrend1H === 'UP') tpAdvice += " [警告] 1H 趋势反转 (变为UP), 建议立即全平";
+      if (p.posSide === 'long' && trend1H.direction === 'DOWN') tpAdvice += " [警告] 1H 趋势反转 (变为DOWN), 建议立即全平";
+      if (p.posSide === 'short' && trend1H.direction === 'UP') tpAdvice += " [警告] 1H 趋势反转 (变为UP), 建议立即全平";
 
       positionContext = `
       === 持仓详情 ===
@@ -417,7 +421,7 @@ export const getTradingDecision = async (
   const marketDataBlock = `
 价格: ${currentPrice.toFixed(2)}
 波动: ${dailyChange.toFixed(2)}%
-【1H 趋势】: ${emaTrendStr} (判断基准: EMA15 vs EMA60)
+【1H 趋势】: ${trend1H.description} (时间: ${trend1H.timestamp ? new Date(trend1H.timestamp).toLocaleTimeString() : 'N/A'})
 【3m 信号】: ${entrySignal3m === 'NONE' ? '无新信号' : entrySignal3m}
 【3m 计算止损位】: ${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : '等待信号'}
 MACD: ${macdSignalStr}
@@ -462,8 +466,8 @@ ${positionContext}
 
 3. **止损 (Ratchet Mechanism)**:
    - 始终使用硬止损 (Algo Order)。
-   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${stopLossTarget3m})。
-   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${stopLossTarget3m})。
+   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : 'N/A'})。
+   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : 'N/A'})。
    - 随价格有利变动，持续按此逻辑推进 SL。
 
 4. **止盈 (分层 Tiered TP)**:
@@ -573,7 +577,7 @@ ${positionContext}
     if (decision.action === 'BUY' || decision.action === 'SELL') {
         const isAdding = hasPosition; // DCA or Pyramiding
         
-        // --- 核心资金管理修改 (修正版) ---
+        // --- 核心资金管理 (修正版) ---
         // 1. 若为加仓/补仓：使用可用余额的 10%-30%
         // 2. 若为首次开仓：使用可用余额的 30%
 
