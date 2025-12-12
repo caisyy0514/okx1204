@@ -119,8 +119,8 @@ const runTradingLoop = async () => {
         
         if (hasPosition) {
             // [Holding Mode]: High Frequency (30s) for tight risk management and rolling
-            aiInterval = 30000; 
-            modeText = "持仓高频战备 (30s)";
+            aiInterval = 120000; 
+            modeText = "持仓高频战备 (120s)";
         } else {
             // [Empty Mode]: Very Low Frequency (10m) for 4H Strategy Token Saving
             // 4H candles take 240 mins to close. Checking every 5 mins is sufficient for trend & pullback entries.
