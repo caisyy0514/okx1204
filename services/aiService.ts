@@ -4,7 +4,6 @@ import { CONTRACT_VAL_ETH, STRATEGY_STAGES, INSTRUMENT_ID, TAKER_FEE_RATE } from
 
 // --- Technical Indicator Helpers ---
 
-// Simple Moving Average
 const calcSMA = (data: number[], period: number): number => {
   if (data.length < period) return 0;
   const slice = data.slice(data.length - period);
@@ -12,7 +11,6 @@ const calcSMA = (data: number[], period: number): number => {
   return sum / period;
 };
 
-// Standard Deviation
 const calcStdDev = (data: number[], period: number): number => {
   if (data.length < period) return 0;
   const sma = calcSMA(data, period);
@@ -22,11 +20,9 @@ const calcStdDev = (data: number[], period: number): number => {
   return Math.sqrt(avgSquaredDiff);
 };
 
-// RSI
 const calcRSI = (prices: number[], period: number = 14): number => {
   if (prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
-  // Calculate initial average
   for (let i = 1; i <= period; i++) {
     const change = prices[i] - prices[i - 1];
     if (change > 0) gains += change;
@@ -35,7 +31,6 @@ const calcRSI = (prices: number[], period: number = 14): number => {
   let avgGain = gains / period;
   let avgLoss = losses / period;
 
-  // Smoothing
   for (let i = period + 1; i < prices.length; i++) {
       const change = prices[i] - prices[i - 1];
       const gain = change > 0 ? change : 0;
@@ -49,7 +44,6 @@ const calcRSI = (prices: number[], period: number = 14): number => {
   return 100 - (100 / (1 + rs));
 };
 
-// EMA
 const calcEMA = (prices: number[], period: number): number => {
   if (prices.length < period) return prices[prices.length - 1];
   const k = 2 / (period + 1);
@@ -60,7 +54,6 @@ const calcEMA = (prices: number[], period: number): number => {
   return ema;
 };
 
-// EMA Array Calculator (for crossovers)
 const calcEMAArray = (prices: number[], period: number): number[] => {
   if (prices.length === 0) return [];
   const k = 2 / (period + 1);
@@ -72,11 +65,9 @@ const calcEMAArray = (prices: number[], period: number): number[] => {
   return emas;
 };
 
-// MACD
 const calcMACD = (prices: number[]) => {
   const shortPeriod = 12;
   const longPeriod = 26;
-  const signalPeriod = 9;
   
   if (prices.length < longPeriod) return { macd: 0, signal: 0, hist: 0 };
   
@@ -89,7 +80,6 @@ const calcMACD = (prices: number[]) => {
   return { macd: macdLine, signal: signalLine, hist: macdLine - signalLine };
 };
 
-// Bollinger Bands
 const calcBollinger = (prices: number[], period: number = 20, multiplier: number = 2) => {
     const mid = calcSMA(prices, period);
     const std = calcStdDev(prices, period);
@@ -100,25 +90,17 @@ const calcBollinger = (prices: number[], period: number = 20, multiplier: number
     };
 };
 
-// KDJ
 const calcKDJ = (highs: number[], lows: number[], closes: number[], period: number = 9) => {
     let k = 50, d = 50, j = 50;
-    
-    // We iterate through the data to smooth K and D
-    // Starting from index 'period'
     for (let i = 0; i < closes.length; i++) {
         if (i < period - 1) continue;
-        
-        // Find Highest High and Lowest Low in last 9 periods
         let localLow = lows[i];
         let localHigh = highs[i];
         for (let x = 0; x < period; x++) {
              if (lows[i-x] < localLow) localLow = lows[i-x];
              if (highs[i-x] > localHigh) localHigh = highs[i-x];
         }
-        
         const rsv = (localHigh === localLow) ? 50 : ((closes[i] - localLow) / (localHigh - localLow)) * 100;
-        
         k = (2/3) * k + (1/3) * rsv;
         d = (2/3) * d + (1/3) * k;
         j = 3 * k - 2 * d;
@@ -181,14 +163,12 @@ export const testConnection = async (apiKey: string): Promise<string> => {
 // --- News Fetcher (Internet Search Capability) ---
 const fetchRealTimeNews = async (): Promise<string> => {
     try {
-        // Fetch Top latest crypto news (Public API)
         const url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=6";
         const res = await fetch(url);
         if (!res.ok) return "暂无法连接互联网新闻源";
         
         const json = await res.json();
         if (json.Data && Array.isArray(json.Data)) {
-            // Format: Title + Source
             const items = json.Data.slice(0, 6).map((item: any) => {
                 const time = new Date(item.published_on * 1000).toLocaleTimeString();
                 return `- [${time}] ${item.title} (Source: ${item.source_info?.name || 'Web'})`;
@@ -197,7 +177,6 @@ const fetchRealTimeNews = async (): Promise<string> => {
         }
         return "扫描未发现即时重大新闻";
     } catch (e) {
-        // Fail gracefully to keep trading logic running
         return "实时搜索暂时不可用 (API Connection Error)";
     }
 };
@@ -500,7 +479,7 @@ ${positionContext}
    - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
    - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
-请输出 JSON 决策。
+请基于上述计算结果生成 JSON 决策。
 `;
 
   const responseSchema = `
