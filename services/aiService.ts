@@ -60,6 +60,18 @@ const calcEMA = (prices: number[], period: number): number => {
   return ema;
 };
 
+// EMA Array Calculator
+const calcEMAArray = (prices: number[], period: number): number[] => {
+  if (prices.length === 0) return [];
+  const k = 2 / (period + 1);
+  const emas = [prices[0]];
+  for (let i = 1; i < prices.length; i++) {
+    const val = prices[i] * k + emas[i - 1] * (1 - k);
+    emas.push(val);
+  }
+  return emas;
+};
+
 // MACD
 const calcMACD = (prices: number[]) => {
   const shortPeriod = 12;
@@ -204,10 +216,8 @@ export const getTradingDecision = async (
   // --- 1. 数据准备 (Data Prep) ---
   const currentPrice = parseFloat(marketData.ticker?.last || "0");
   const open24h = parseFloat(marketData.ticker?.open24h || "0");
-  const vol24h = parseFloat(marketData.ticker?.volCcy24h || "0"); // USDT Volume
   const totalEquity = parseFloat(accountData.balance.totalEq);
   const availableEquity = parseFloat(accountData.balance.availEq);
-  const openInterest = parseFloat(marketData.openInterest || "1"); 
   const sharpeRatio = accountData.sharpeRatio || 0; // Performance Metric
 
   // K-Line Data Arrays (15m for short term indicators)
@@ -215,7 +225,6 @@ export const getTradingDecision = async (
   const closes = candles.map(c => parseFloat(c.c));
   const highs = candles.map(c => parseFloat(c.h));
   const lows = candles.map(c => parseFloat(c.l));
-  const volumes = candles.map(c => parseFloat(c.vol));
 
   // --- 2. 指标计算 (Indicators) ---
   const dailyChange = open24h > 0 ? ((currentPrice - open24h) / open24h) * 100 : 0;
@@ -241,32 +250,86 @@ export const getTradingDecision = async (
 
   // --- 3. 核心：1小时级别 EMA 趋势判断 (EMA15 vs EMA60) ---
   const candles1H = marketData.candles1H || [];
+  let emaTrend1H = "NEUTRAL";
   let emaTrendStr = "震荡/无明确趋势";
   
   if (candles1H.length > 60) {
       const closes1H = candles1H.map(c => parseFloat(c.c));
       const latestClose1H = closes1H[closes1H.length - 1];
       const latestOpen1H = parseFloat(candles1H[candles1H.length - 1].o);
+      const latestTime1H = new Date(parseInt(candles1H[candles1H.length - 1].ts)).toLocaleTimeString();
       
       const ema15_1H = calcEMA(closes1H, 15);
       const ema60_1H = calcEMA(closes1H, 60);
       
-      const isUpCross = ema15_1H > ema60_1H; // Simplified check: if 15 above 60
-      const isYang = latestClose1H > latestOpen1H; // Red/Green candle check
-      const isYin = latestClose1H < latestOpen1H;
+      const isUpCross = ema15_1H > ema60_1H; 
+      const isYang = latestClose1H > latestOpen1H; // Green Candle
+      const isYin = latestClose1H < latestOpen1H; // Red Candle
 
       if (isUpCross && isYang) {
-          emaTrendStr = "强上涨趋势 (EMA15 > EMA60 + 收阳)";
+          emaTrend1H = "UP";
+          emaTrendStr = `UP (EMA15>60 & 收阳) @ ${latestTime1H}`;
       } else if (!isUpCross && isYin) {
-          emaTrendStr = "强下跌趋势 (EMA15 < EMA60 + 收阴)";
-      } else if (isUpCross) {
-          emaTrendStr = "多头排列 (但K线收阴, 需观察)";
+          emaTrend1H = "DOWN";
+          emaTrendStr = `DOWN (EMA15<60 & 收阴) @ ${latestTime1H}`;
       } else {
-          emaTrendStr = "空头排列 (但K线收阳, 需观察)";
+          emaTrendStr = isUpCross ? "震荡偏多 (EMA多头但收阴)" : "震荡偏空 (EMA空头但收阳)";
       }
   }
 
-  // --- 4. 核心：持仓分析与利润保护计算 (Advanced Position Analysis) ---
+  // --- 4. 核心：3分钟图 入场/出场信号 (Entry/Exit Signals) ---
+  const candles3m = marketData.candles3m || [];
+  let entrySignal3m = "NONE";
+  let stopLossTarget3m = 0;
+  
+  if (candles3m.length > 65) {
+      const closes3m = candles3m.map(c => parseFloat(c.c));
+      const lows3m = candles3m.map(c => parseFloat(c.l));
+      const highs3m = candles3m.map(c => parseFloat(c.h));
+      
+      // Calculate full EMA arrays to look back for crossovers
+      const ema15Array = calcEMAArray(closes3m, 15);
+      const ema60Array = calcEMAArray(closes3m, 60);
+      
+      const idx = closes3m.length - 1; // Current Candle Index
+      
+      // Detect Golden Cross (EMA15 crosses above EMA60)
+      // Check last 3 candles for fresh cross
+      // Cross happens if prev: 15 < 60 AND curr: 15 > 60
+      const isGoldenCross = (ema15Array[idx] > ema60Array[idx]) && (ema15Array[idx-1] <= ema60Array[idx-1]);
+      
+      // Detect Death Cross (EMA15 crosses below EMA60)
+      const isDeathCross = (ema15Array[idx] < ema60Array[idx]) && (ema15Array[idx-1] >= ema60Array[idx-1]);
+
+      if (isGoldenCross) {
+          entrySignal3m = "BUY_SIGNAL"; // Golden Cross
+          // Find Lowest Low in the previous Death Cross Interval (where 15 < 60)
+          let searchIdx = idx - 1;
+          let minLow = lows3m[idx];
+          // Look back max 50 candles
+          while(searchIdx > 0 && (idx - searchIdx) < 50) {
+              if (ema15Array[searchIdx] > ema60Array[searchIdx]) break; // End of death cross interval
+              if (lows3m[searchIdx] < minLow) minLow = lows3m[searchIdx];
+              searchIdx--;
+          }
+          stopLossTarget3m = minLow;
+      } 
+      else if (isDeathCross) {
+          entrySignal3m = "SELL_SIGNAL"; // Death Cross
+          // Find Highest High in the previous Golden Cross Interval (where 15 > 60)
+          let searchIdx = idx - 1;
+          let maxHigh = highs3m[idx];
+           // Look back max 50 candles
+          while(searchIdx > 0 && (idx - searchIdx) < 50) {
+              if (ema15Array[searchIdx] < ema60Array[searchIdx]) break; // End of golden cross interval
+              if (highs3m[searchIdx] > maxHigh) maxHigh = highs3m[searchIdx];
+              searchIdx--;
+          }
+          stopLossTarget3m = maxHigh;
+      }
+  }
+
+  // --- 5. 持仓分析与分层止盈 (Position Analysis & Tiered TP) ---
   const primaryPosition = accountData.positions.find(p => p.instId === INSTRUMENT_ID);
   
   let stageName = "";
@@ -288,6 +351,7 @@ export const getTradingDecision = async (
   let breakevenPrice = 0;
   let netPnL = 0;
   let estimatedTotalFees = 0;
+  let tpAdvice = "暂无";
   
   if (hasPosition) {
       const p = primaryPosition!;
@@ -295,45 +359,33 @@ export const getTradingDecision = async (
       const sizeCoin = sizeContracts * CONTRACT_VAL_ETH;
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
+      const uplRatio = parseFloat(p.uplRatio);
       
       // Strict Breakeven Calculation
-      // 1. Calculate Local Estimate (Validation)
       let localBreakeven = 0;
       if (p.posSide === 'long') {
           localBreakeven = entryPrice * (1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE);
       } else {
           localBreakeven = entryPrice * (1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE);
       }
-
-      // 2. Get Exchange Data (Primary Source)
       const exchangeBreakeven = parseFloat(p.breakEvenPx || "0");
+      breakevenPrice = exchangeBreakeven > 0 ? exchangeBreakeven : localBreakeven;
       
-      // 3. Decision & Validation Logic
-      let validationNote = "";
-      if (exchangeBreakeven > 0) {
-          breakevenPrice = exchangeBreakeven;
-          // Verify with local calc
-          const diff = Math.abs(exchangeBreakeven - localBreakeven);
-          const diffPct = (diff / localBreakeven) * 100;
-          
-          if (diffPct > 0.1) { // 0.1% tolerance
-              validationNote = `[数据警告] 交易所BE(${exchangeBreakeven}) 与 本地估算(${localBreakeven.toFixed(2)}) 差异 ${diffPct.toFixed(2)}%`;
-          } else {
-              validationNote = `[数据校验通过] (Exchange Data)`;
-          }
-      } else {
-          // Fallback to local if exchange data missing
-          breakevenPrice = localBreakeven;
-          validationNote = `[使用本地估算] (Exchange Data Unavailable)`;
-      }
-      
-      // Calculate Real Net PnL (Floating PnL - Estimated Closing Fee - Estimated Opening Fee)
-      // Note: UPL from exchange usually excludes fees. We must ensure we cover costs.
+      // Net Profit
       const currentVal = sizeCoin * currentPrice;
       const entryVal = sizeCoin * entryPrice;
       estimatedTotalFees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
-      
       netPnL = upl - estimatedTotalFees;
+
+      // Tiered Take Profit Logic
+      if (uplRatio > 0.15) tpAdvice = "触发 15% 止盈线: 建议全部平仓";
+      else if (uplRatio > 0.10) tpAdvice = "触发 10% 止盈线: 平仓 30%, 止损移至 +5% 处";
+      else if (uplRatio > 0.05) tpAdvice = "触发 5% 止盈线: 平仓 50%";
+      else tpAdvice = "持有中 (收益 < 5%)";
+      
+      // 1H Trend Reversal Check
+      if (p.posSide === 'long' && emaTrend1H === 'DOWN') tpAdvice += " [警告] 1H 趋势反转 (变为DOWN), 建议立即全平";
+      if (p.posSide === 'short' && emaTrend1H === 'UP') tpAdvice += " [警告] 1H 趋势反转 (变为UP), 建议立即全平";
 
       positionContext = `
       === 持仓详情 ===
@@ -343,38 +395,38 @@ export const getTradingDecision = async (
       当前市价: ${currentPrice.toFixed(2)}
       
       === 盈亏分析 (Net Profit) ===
-      浮动盈亏 (UPL): ${upl.toFixed(2)} U
+      浮动盈亏 (UPL): ${upl.toFixed(2)} U (${(uplRatio*100).toFixed(2)}%)
       预估双边手续费: ${estimatedTotalFees.toFixed(2)} U
-      【净利润】: ${netPnL.toFixed(2)} U  <-- 决策核心依据
+      【净利润】: ${netPnL.toFixed(2)} U
       
       === 保护锚点 ===
-      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)} ${validationNote}
+      【盈亏平衡价 (Breakeven)】: ${breakevenPrice.toFixed(2)}
       当前止损 (SL): ${p.slTriggerPx || "未设置"}
-      当前止盈 (TP): ${p.tpTriggerPx || "未设置 (建议不设，用移动止损)"}
+      当前止盈 (TP): ${p.tpTriggerPx || "未设置"}
+      
+      === 分层止盈建议 ===
+      ${tpAdvice}
       `;
   }
 
   // --- NEW: Perform "Internet Search" (Fetch Real-time News) ---
   const newsContext = await fetchRealTimeNews();
 
-  // --- 5. 构建 Prompt (Refined 9 Rules + Internet Search + EMA Trend + Sharpe) ---
+  // --- 6. 构建 Prompt (Strategy Update) ---
   
   const marketDataBlock = `
 价格: ${currentPrice.toFixed(2)}
 波动: ${dailyChange.toFixed(2)}%
-【1H 趋势信号】: ${emaTrendStr} (关键决策参考)
+【1H 趋势】: ${emaTrendStr} (判断基准: EMA15 vs EMA60)
+【3m 信号】: ${entrySignal3m === 'NONE' ? '无新信号' : entrySignal3m}
+【3m 计算止损位】: ${stopLossTarget3m > 0 ? stopLossTarget3m.toFixed(2) : '等待信号'}
 MACD: ${macdSignalStr}
 RSI: ${rsi14.toFixed(2)}
-KDJ: ${kdjSignalStr}
-布林: ${bollPosStr}
 `;
 
   const performanceBlock = `
 【绩效分析 (夏普比率 Sharpe Ratio)】: ${sharpeRatio.toFixed(2)}
-- Sharpe < 0: 平均亏损 -> 需大幅减小头寸，严格止损，极度挑剔。
-- Sharpe 0-1: 正回报但波动大 -> 保持谨慎，适当减小头寸。
-- Sharpe 1-2: 良好表现 -> 保持当前策略节奏。
-- Sharpe > 2: 卓越表现 -> 保持纪律，防止飘飘然。
+- Sharpe < 0: 平均亏损 -> 若计划开仓或补仓，强制大幅降低仓位。
 `;
 
   const systemPrompt = `
@@ -387,7 +439,7 @@ KDJ: ${kdjSignalStr}
 - 市场: ${marketDataBlock}
 - 绩效: ${performanceBlock}
 
-**实时互联网情报 (Real-time Internet Search)**:
+**实时互联网情报**:
 ${newsContext}
 
 **持仓状态**:
@@ -395,61 +447,42 @@ ${positionContext}
 
 ---
 
-**核心决策九大军规 (The 9 Commandments)**:
+**核心策略规则 (Strict Rules)**:
 
-1. **本金保护 (Capital Protection)**:
-   - 使用 **棘轮机制 (Ratchet)** 移动止损：止损价 **只能向盈利更多的方向移动**，严禁回调。
-   - **关键调整**：在【净利润 < 0】的亏损/回本途中，**严禁激进回调止损**，**只能向盈利更多的方向移动**。
-   - 除非出现极强的结构性支撑，否则不要因为微小的价格反弹就紧跟移动止损，这会导致在达到盈亏平衡前被市场噪音震荡出局。
-   - **多头 (Long)**: 目标是 SL 向上移至 Breakeven 甚至更高。**New SL 必须 >= Old SL**。
-   - **空头 (Short)**: 目标是 SL 向下移至 Breakeven 甚至更低。**New SL 必须 <= Old SL**。
+1. **1H 趋势判断 (Trend)**:
+   - 必须严格遵循上方提供的 【1H 趋势】 信号。
+   - UP = EMA15 > EMA60 且 K线阳线。
+   - DOWN = EMA15 < EMA60 且 K线阴线。
 
-2. **锁定利润与防震荡 (Profit Locking & Noise Filtering)**:
-   - 当【净利润 (Net PnL) > 0】时，**严禁过于激进地调整 SL**。
-   - **降低止损调整频率**：不要仅仅因为微小盈利就急于将 SL 移至 Breakeven。
-   - 只有当价格**显著脱离**成本区（建立了足够的安全垫，例如盈利 > 0.5% 或突破关键结构）后，才将 SL 跨越 Breakeven（多单向上跨越，空单向下跨越）。
-   - 目的：避免因过早收紧止损而被正常波动（噪音）震荡出局。
-   - 这是优先级最高的任务：先保证不亏，再追求盈利，此时才是“零风险博弈”的开始，此前应以“生存”为主，容忍合理波动。
+2. **入场时机 (Entry)**:
+   - **必须在 1H 趋势方向上操作**。
+   - **做多 (Long)**: 1H趋势为 UP，且 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。当前是否触发: ${entrySignal3m === 'BUY_SIGNAL' ? 'YES' : 'NO'}。
+   - **做空 (Short)**: 1H趋势为 DOWN，且 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。当前是否触发: ${entrySignal3m === 'SELL_SIGNAL' ? 'YES' : 'NO'}。
+   - 如果满足条件，在收盘后立即开仓。
 
-3. **趋势上限探索 (Trend Exploration)**:
-   - **不要设置硬止盈 (TP)** 限制收益上限，除非遇到极强阻力。
-   - 使用 **移动止损 (Trailing SL)** 来跟随趋势，让利润奔跑，直到趋势反转触碰 SL 离场。
-   - **趋势判定**: 参考【1H 趋势信号】。若 EMA15 上穿 EMA60 且收阳，看涨；若下穿且收阴，看跌。
+3. **止损 (Ratchet Mechanism)**:
+   - 始终使用硬止损 (Algo Order)。
+   - **多单**: 仅允许上移。初始目标 = 3m趋势下最新完成的死叉区间最低点 (${stopLossTarget3m})。
+   - **空单**: 仅允许下移。初始目标 = 3m趋势下最新完成的金叉区间最高点 (${stopLossTarget3m})。
+   - 随价格有利变动，持续按此逻辑推进 SL。
 
-4. **补仓机制 (Smart DCA)**:
-   - 触发条件：浮亏状态 + 触及关键支撑位 + 逻辑未破坏 + 风险可控 (Risk Controllable)。
-   - 目的：摊低成本 (Average Down)。
-   - **资金分配原则**: 补仓金额应基于**当前账户可用余额 (Available Equity)**，而非当前持仓量。
-   - 建议每次补仓使用 **可用余额的 10%-20%**，循序渐进。
-   - 禁忌：趋势已反转或仓位过重时，严禁补仓，应直接止损。
+4. **止盈 (分层 Tiered TP)**:
+   - 收益 > 5%: 平仓 30%。
+   - 收益 > 10%: 再平仓 30%，并将止损移至盈利 50% 处。
+   - 收益 > 15%: 全部平仓。
+   - **1H 趋势反转**: 立即全部平仓。
 
-5. **金字塔加仓 (Pyramiding)**:
-   - 触发条件：【净利润 > 0】 + 趋势确认突破 + 风险可控。
-   - 目的：捕捉本次交易的最大收益。
-   - 原则：加仓部分应小于底仓 (倒金字塔是找死)。
+5. **资金管理**:
+   - **首仓**: 30% 权益。
+   - **补仓 (Smart DCA)**: 触发条件为浮亏+支撑位+逻辑未坏。单次补仓仅使用剩余资金的 10%-30%。循序渐进。
+   - 夏普比率 < 0 时，进一步降低开仓规模。
 
-6. **核心目标**:
-   - 一切决策以 **净利润 (Net Profit)** 为核心。净利润 = 浮盈 - 双边手续费。
+6. **锚点战术**:
+   - **Breakeven Price** 是最重要的战场分界线。
+   - 战术路径：触达 Breakeven -> 确保 SL 安全跨越 Breakeven 线 -> 开启无限追利。
 
-7. **波动容忍 (Volatility Filter)**:
-   - 在寻找调整 SL 时机时，必须给予价格足够的 "呼吸空间" (Technical Stop)。
-   - 即使进入盈利区，也**不要过早收紧**容忍度，以免被市场噪音扫损离场。
-
-8. **锚点战术 (Anchor Point)**:
-   - 交易所的 **Breakeven Price** 是重要的参考线。
-   - 你的战术动作：在确保安全（不被轻易震出）的前提下，稳步推进 SL 跨越 Breakeven 线（多单向上跨越，空单向下跨越）。
-
-9. **AI 动态风控与绩效校准**:
-   - 一旦实现盈亏平衡 (持有多单情况下 SL 向上跨越 Breakeven，持有空单情况下 SL 向下跨越 Breakeven)，由你根据 **市场热点(基于提供的互联网情报)**、技术指标全权接管 SL 的移动节奏。
-   - **夏普比率校准**: 
-     - 若 Sharpe Ratio < 0: **强制降低开仓仓位 (如减半)**，收紧止损范围，减少开单频率。
-     - 若 Sharpe Ratio 0-1: 保持谨慎。
-     - 若 Sharpe Ratio > 1: 策略有效，保持当前节奏。
-
-**资金管理红线 (重要)**:
-- **[首次开仓]**: 保证金严禁超过 **可用余额的 30%**。
-- **[补仓/加仓]**: 单次保证金使用 **可用余额的 10%-20%**。
-- 请在 reasoning 中明确说明你是 "首次开仓" 还是 "补仓/加仓"。
+7. **核心目标**:
+   - 一切决策以 **净利润 (Net Profit)** 为核心。
 
 **操作指令**:
 - **UPDATE_TPSL**: 调整止损止盈 (最常用)。
@@ -457,32 +490,40 @@ ${positionContext}
 - **CLOSE**: 立即市价全平。
 - **HOLD**: 暂时不动。
 
-请输出 JSON 决策。如果建议 UPDATE_TPSL，必须给出明确的 \`stop_loss\` 数值。
+**输出要求**:
+1. 返回格式必须为 JSON。
+2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
+3. **hot_events_overview** 字段：请仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
+4. **market_assessment** 字段：必须明确包含以下两行结论：
+   - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
+   - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
+
+请输出 JSON 决策。
 `;
 
   const responseSchema = `
   {
     "stage_analysis": "简述...",
     "hot_events_overview": "结合上述实时互联网情报，简述关键市场事件...",
-    "market_assessment": "重点点评 EMA 趋势状态...",
+    "market_assessment": "重点点评 1H 趋势与 3m 信号...",
     "eth_analysis": "...", 
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
       "confidence": "0-100%",
       "position_size": "数量(张), 仅在BUY/SELL时有效",
       "leverage": "${currentStageParams.leverage}",
-      "profit_target": "建议留空或设极高",
+      "profit_target": "按分层止盈逻辑，通常留空由系统监控，除非全平",
       "stop_loss": "严格计算后的新SL (必须遵守棘轮机制)",
       "invalidation_condition": "..."
     },
-    "reasoning": "解释是否触发棘轮？是否已移动至保本价之上？夏普比率如何影响了你的决策？"
+    "reasoning": "解释是否符合 1H 趋势？3m 信号是否触发？止损位如何计算？"
   }
   `;
 
   try {
     const text = await callDeepSeek(apiKey, [
         { role: "system", content: systemPrompt + "\nJSON ONLY:\n" + responseSchema },
-        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据九大军规及实时情报给出最佳操作。` }
+        { role: "user", content: `当前净利润: ${netPnL.toFixed(2)} U。请根据新版策略及实时情报给出最佳操作。` }
     ]);
 
     if (!text) throw new Error("AI 返回为空");
@@ -533,17 +574,13 @@ ${positionContext}
         const isAdding = hasPosition; // DCA or Pyramiding
         
         // --- 核心资金管理修改 (修正版) ---
-        // 1. 若为加仓/补仓：使用可用余额的 10%-20%
+        // 1. 若为加仓/补仓：使用可用余额的 10%-30%
         // 2. 若为首次开仓：使用可用余额的 30%
-        // 注意：不依赖AI的position_size，而是基于当前 availableEquity 重新计算推荐值，
-        // 除非AI给出的数值非常明确且在合理范围内。这里为了稳健，如果AI数值异常，则回退到算法。
 
         // Apply Sharpe Ratio Adjustment Logic (Systematic Override)
         let sharpeModifier = 1.0;
         if (sharpeRatio < 0) {
             sharpeModifier = 0.5; // Cut size in half if performance is bad
-        } else if (sharpeRatio > 0 && sharpeRatio < 1) {
-            sharpeModifier = 0.8; // Reduce slightly
         }
 
         // 1. Determine Target Contracts from Algo
@@ -552,9 +589,9 @@ ${positionContext}
         // Calculate Base Margin based on Strategy
         let baseRiskRatio = 0;
         if (isAdding) {
-            baseRiskRatio = 0.15; // DCA use 15% of *remaining* equity
+            baseRiskRatio = 0.15; // DCA use ~15% (Range 10-30%)
         } else {
-            baseRiskRatio = 0.30; // Initial Entry use 30% of equity
+            baseRiskRatio = 0.30; // Initial Entry use 30%
         }
         
         // Apply Sharpe Modifier to Risk Ratio
@@ -573,7 +610,6 @@ ${positionContext}
 
         // 3. Decision Logic: AI vs Algo
         // If AI gives valid number, verify it against cap.
-        // If AI gives 0 or NaN, use Algo.
         if (aiContracts > 0 && !isNaN(aiContracts)) {
              finalContracts = aiContracts;
         } else {
@@ -581,8 +617,8 @@ ${positionContext}
         }
 
         // 4. Calculate Max Available Contracts (Safety Cap)
-        // Hard Cap: Initial Trade Max 30%, DCA Max 20% of current available
-        const capRatio = isAdding ? 0.20 : 0.30;
+        // Hard Cap: Initial Trade Max 30%, DCA Max 30% of current available
+        const capRatio = 0.30; 
         const maxMarginCap = availableEquity * capRatio;
         const maxPosValueCap = maxMarginCap * safeLeverage;
         const maxContractsCap = maxPosValueCap / (CONTRACT_VAL_ETH * priceForCalc);
@@ -596,9 +632,8 @@ ${positionContext}
         decision.size = Math.max(finalContracts, 0.01).toFixed(2);
         decision.leverage = safeLeverage.toString();
 
-        // Final check: if calculated size is still effectively 0 or invalid given min size constraints vs balance
+        // Final check
         if (parseFloat(decision.size) < 0.01 || isNaN(parseFloat(decision.size))) {
-             console.warn("[Risk Control] Insufficient balance for minimum order size (or NaN). Forcing HOLD.");
              decision.action = 'HOLD';
              decision.size = "0";
              decision.reasoning += " [系统拦截: 账户余额不足以开出最小仓位]";
