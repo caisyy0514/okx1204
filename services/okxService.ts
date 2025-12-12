@@ -198,7 +198,7 @@ const ensureLongShortMode = async (config: any) => {
             const setRes = await fetch(BASE_URL + setPath, { method: 'POST', headers: setHeaders, body: setBody });
             const setJson = await setRes.json();
             if (setJson.code !== '0') {
-                throw new Error(`无法切换持仓模式为双向持仓: ${setJson.msg}。请确保无持仓后重试。`);
+                throw new Error(`无法切换持仓模式为双向持仓: ${setJson.msg}。请确保无持仓后再重试。`);
             }
         }
     }
