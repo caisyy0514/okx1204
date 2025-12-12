@@ -1,4 +1,5 @@
 
+
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -107,7 +108,7 @@ const runTradingLoop = async () => {
     const now = Date.now();
     
     // Default config
-    let aiInterval = 15000; 
+    let aiInterval = 300000; // Default: 5 minutes
     let modeText = "初始化";
 
     if (accountData) {
@@ -117,13 +118,14 @@ const runTradingLoop = async () => {
         const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
         
         if (hasPosition) {
-            // [Holding Mode]: High Frequency (30s)
+            // [Holding Mode]: High Frequency (30s) for tight risk management and rolling
             aiInterval = 30000; 
-            modeText = "持仓高频监测";
+            modeText = "持仓高频战备 (30s)";
         } else {
-            // [Empty Mode]: Low Frequency (120s)
-            aiInterval = 120000; 
-            modeText = "空仓低频扫描";
+            // [Empty Mode]: Very Low Frequency (10m) for 4H Strategy Token Saving
+            // 4H candles take 240 mins to close. Checking every 5 mins is sufficient for trend & pullback entries.
+            aiInterval = 600000; 
+            modeText = "空仓节能扫描 (10min)";
         }
     }
 
@@ -134,7 +136,7 @@ const runTradingLoop = async () => {
     setTimeout(async () => {
         try {
             lastAnalysisTime = now;
-            addLog('INFO', `正在调用云端战神引擎 (${modeText})...`);
+            addLog('INFO', `正在调用云端战神引擎 [${modeText}]...`);
             
             if (!marketData || !accountData) return;
 
