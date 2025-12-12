@@ -464,8 +464,9 @@ function generateMockMarketData(): MarketDataCollection {
     return candles.reverse();
   };
 
+  // Mock 1H
   const candles1H = generateCandles(100).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
-  // Generate 3m candles for mock
+  // Mock 3m
   const candles3m = generateCandles(100);
 
   return {
