@@ -1,4 +1,5 @@
 
+
 import React, { useEffect, useState } from 'react';
 import CandleChart from './components/CandleChart';
 import SettingsModal from './components/SettingsModal';
@@ -268,11 +269,12 @@ const App: React.FC = () => {
           <div className="lg:col-span-8 flex flex-col gap-4 lg:h-full h-auto min-h-0">
             {/* Chart Area */}
             <div className="lg:h-[60%] h-[400px] bg-okx-card rounded-xl border border-okx-border overflow-hidden relative group shadow-lg shrink-0">
-               {marketData?.candles15m && marketData.candles15m.length > 0 ? (
-                  <CandleChart data={marketData.candles15m} />
+               {/* Use 4H Candles to visualize EMA strategy */}
+               {marketData?.candles4H && marketData.candles4H.length > 0 ? (
+                  <CandleChart data={marketData.candles4H} />
                ) : (
                   <div className="w-full h-full flex items-center justify-center text-okx-subtext">
-                    <Activity className="animate-pulse mr-2" /> 等待市场数据...
+                    <Activity className="animate-pulse mr-2" /> 等待市场数据 (4H)...
                   </div>
                )}
                {/* Floating Ticker Info */}
@@ -283,6 +285,7 @@ const App: React.FC = () => {
                   </div>
                   <div className="flex gap-4 text-gray-400">
                       <span className="flex items-center gap-1"><TrendingUp size={10}/> 24H: {marketData?.ticker?.volCcy24h ? (parseInt(marketData.ticker.volCcy24h)/1000000).toFixed(1) + 'M' : '0'}</span>
+                      <span className="flex items-center gap-1 text-purple-400 border border-purple-400/30 px-1 rounded bg-purple-400/10">EMA Trend: 4H</span>
                   </div>
                </div>
             </div>
