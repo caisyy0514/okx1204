@@ -1,4 +1,5 @@
 
+
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext } from "../types";
 import { INSTRUMENT_ID, MOCK_TICKER, CONTRACT_VAL_ETH } from "../constants";
 import CryptoJS from 'crypto-js';
@@ -52,6 +53,10 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
     const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=1H&limit=100`);
     const candles1HJson = await candles1HRes.json();
 
+    // Fetch 4H candles for AI Strategy
+    const candles4HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=4H&limit=100`);
+    const candles4HJson = await candles4HRes.json();
+
     const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${INSTRUMENT_ID}`);
     const fundingJson = await fundingRes.json();
     
@@ -66,6 +71,7 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
       candles5m: formatCandles(candles5mJson.data),
       candles15m: formatCandles(candles15mJson.data),
       candles1H: formatCandles(candles1HJson.data),
+      candles4H: formatCandles(candles4HJson.data),
       fundingRate: fundingJson.data[0]?.fundingRate || "0",
       openInterest: oiJson.data[0]?.oi || "0",
       orderbook: {}, 
@@ -444,11 +450,11 @@ function formatCandles(apiCandles: any[]): CandleData[] {
 function generateMockMarketData(): MarketDataCollection {
   const now = Date.now();
   const currentPrice = 3250 + Math.sin(now / 10000) * 50; 
-  const generateCandles = (count: number) => {
+  const generateCandles = (count: number, interval: number = 900000) => {
     const candles: CandleData[] = [];
     let price = currentPrice;
     for (let i = 0; i < count; i++) {
-      const ts = (now - i * 900000).toString();
+      const ts = (now - i * interval).toString();
       const open = price;
       const close = randomVariation(open, 0.5);
       candles.push({ 
@@ -465,16 +471,19 @@ function generateMockMarketData(): MarketDataCollection {
   };
 
   // Mock 1H
-  const candles1H = generateCandles(100).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
+  const candles1H = generateCandles(100, 3600000).map(c => ({...c, vol: (parseFloat(c.vol)*4).toString()}));
   // Mock 3m
-  const candles3m = generateCandles(100);
+  const candles3m = generateCandles(100, 180000);
+  // Mock 4H (Added)
+  const candles4H = generateCandles(100, 14400000).map(c => ({...c, vol: (parseFloat(c.vol)*16).toString()}));
 
   return {
     ticker: { ...MOCK_TICKER, last: currentPrice.toFixed(2), ts: now.toString() },
     candles3m: candles3m,
-    candles5m: generateCandles(50),
-    candles15m: generateCandles(100),
+    candles5m: generateCandles(50, 300000),
+    candles15m: generateCandles(100, 900000),
     candles1H: candles1H,
+    candles4H: candles4H,
     fundingRate: "0.0001",
     openInterest: "50000",
     orderbook: [],
