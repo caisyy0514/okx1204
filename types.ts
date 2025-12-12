@@ -1,4 +1,5 @@
 
+
 // OKX Data Types
 export interface TickerData {
   instId: string;
@@ -58,6 +59,7 @@ export interface MarketDataCollection {
   candles5m: CandleData[];
   candles15m: CandleData[]; // Used for indicators
   candles1H: CandleData[]; // NEW: Used for EMA Trend Strategy
+  candles4H: CandleData[]; // NEW: Used for AI Strategy (Restored)
   fundingRate: string;
   openInterest: string;
   orderbook: any; 
