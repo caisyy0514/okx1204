@@ -162,8 +162,24 @@ export const getTradingDecision = async (
   let positionContext = "当前无持仓";
   let canRoll = true;
 
-  // Calculate standard rolling requirement (5% of Total Equity)
-  const minReqEquity = totalEquity * 0.05;
+  // Strategy Params
+  const leverage = 20; // Fixed Strategy Leverage
+  const ruleReqEquity = totalEquity * 0.05; // 5% Rule
+
+  // Calculate Absolute Minimum Cost (0.01 contracts)
+  // OKX Min Size is typically 1 contract for many pairs, but code allows 0.01 float. 
+  // We assume 0.01 is the floor.
+  const price = currentPrice > 0 ? currentPrice : 1;
+  const minContractSize = 0.01; 
+  const minPosVal = minContractSize * CONTRACT_VAL_ETH * price;
+  const minMarginReq = minPosVal / leverage;
+  const estimatedFee = minPosVal * TAKER_FEE_RATE * 1.5; // 1.5x buffer for safety
+  const minOpenCost = minMarginReq + estimatedFee;
+
+  // Real Check: 
+  // 1. Available Equity >= 5% Rule
+  // 2. Available Equity >= Minimum Order Cost (to prevent 51008)
+  canRoll = availableEquity >= ruleReqEquity && availableEquity >= minOpenCost;
 
   if (hasPosition) {
       const p = primaryPosition!;
@@ -171,7 +187,6 @@ export const getTradingDecision = async (
       const sizeCoin = sizeContracts * CONTRACT_VAL_ETH;
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
-      // const uplRatio = parseFloat(p.uplRatio); // Unused for logic now, using netProfitRatio
       
       const currentVal = sizeCoin * currentPrice;
       const entryVal = sizeCoin * entryPrice;
@@ -187,9 +202,6 @@ export const getTradingDecision = async (
       if (margin > 0) {
           netProfitRatio = netPnL / margin;
       }
-
-      // Check Funds for Rolling
-      canRoll = availableEquity >= minReqEquity;
 
       // Rolling Logic Trigger: NET Profit > 5%
       if (netProfitRatio >= 0.05) {
@@ -207,14 +219,15 @@ export const getTradingDecision = async (
       净收益率 (Net ROE): ${(netProfitRatio * 100).toFixed(2)}%
       
       === 资金与滚仓状态 ===
-      滚仓资金门槛 (5%): ${minReqEquity.toFixed(2)} U
+      策略滚仓门槛 (5%): ${ruleReqEquity.toFixed(2)} U
+      最低下单成本 (0.01张): ${minOpenCost.toFixed(2)} U
       当前可用资金: ${availableEquity.toFixed(2)} U
       资金是否充足: ${canRoll ? "YES" : "NO (进入直营/止盈模式)"}
       净利润达标 (5%): ${rollingTrigger ? "YES" : "NO"}
       `;
   } else {
       // Empty position, check if enough to open
-      canRoll = availableEquity >= minReqEquity;
+      canRoll = availableEquity >= ruleReqEquity && availableEquity >= minOpenCost;
   }
 
   // --- 4. 构建 Prompt (The New 5 Rules) ---
@@ -337,11 +350,10 @@ ${positionContext}
     // --- 资金管理逻辑 (Code Logic Override for Safety) ---
     // Rule: Initial 5% of Equity. Rolling 5% of Equity.
     const targetMargin = totalEquity * 0.05; // 5% of Total Equity
-    const leverage = 20; // Standardize leverage
+    // leverage already defined above
     
     // Calculate contracts for 5% equity
-    const priceForCalc = currentPrice > 0 ? currentPrice : 1;
-    const contractVal = CONTRACT_VAL_ETH * priceForCalc; // Value of 1 contract in USDT
+    const contractVal = CONTRACT_VAL_ETH * price; // Value of 1 contract in USDT
     const targetPosValue = targetMargin * leverage;
     const targetContracts = targetPosValue / contractVal;
     
@@ -381,7 +393,7 @@ ${positionContext}
                     // Prevent adding if funds exhausted
                     console.warn("AI attempted to add position but funds exhausted. Forcing HOLD.");
                     decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 资金耗尽，无法滚仓]";
+                    decision.reasoning += " [系统拦截: 资金耗尽(含最小0.01张限制)，无法滚仓]";
                 }
              }
         }
