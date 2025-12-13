@@ -160,6 +160,10 @@ export const getTradingDecision = async (
   let uplRatio = 0;
   let rollingTrigger = false;
   let positionContext = "当前无持仓";
+  let canRoll = true;
+
+  // Calculate standard rolling requirement (5% of Total Equity)
+  const minReqEquity = totalEquity * 0.05;
 
   if (hasPosition) {
       const p = primaryPosition!;
@@ -173,6 +177,9 @@ export const getTradingDecision = async (
       const entryVal = sizeCoin * entryPrice;
       const fees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
       netPnL = upl - fees;
+
+      // Check Funds for Rolling
+      canRoll = availableEquity >= minReqEquity;
 
       // Rolling Logic Trigger: Profit > 5%
       // Note: uplRatio is a good proxy. 0.05 = 5%.
@@ -188,12 +195,18 @@ export const getTradingDecision = async (
       浮盈比例: ${(uplRatio * 100).toFixed(2)}%
       净利润: ${netPnL.toFixed(2)} U
       
-      === 滚仓状态 ===
-      是否满足加仓条件 (Profit > 5%): ${rollingTrigger ? "YES (建议加仓)" : "NO"}
+      === 资金与滚仓状态 ===
+      滚仓资金门槛 (5%): ${minReqEquity.toFixed(2)} U
+      当前可用资金: ${availableEquity.toFixed(2)} U
+      资金是否充足: ${canRoll ? "YES" : "NO (进入直营/止盈模式)"}
+      收益达标 (5%): ${rollingTrigger ? "YES" : "NO"}
       `;
+  } else {
+      // Empty position, check if enough to open
+      canRoll = availableEquity >= minReqEquity;
   }
 
-  // --- 4. 构建 Prompt (The New 4 Rules) ---
+  // --- 4. 构建 Prompt (The New 5 Rules) ---
   
   // Real-time News
   const newsContext = await fetchRealTimeNews();
@@ -220,49 +233,44 @@ ${marketDataBlock}
 **互联网情报**:
 ${newsContext}
 
-**四大核心原则 (不可违背)**:
+**核心原则 (不可违背)**:
 
 1. **趋势定义 (EMA 4H)**:
    - 依据: EMA21 (短期) 和 EMA55 (长期) 在 **4小时** 级别图表上的关系。
    - 趋势判断: EMA21 > EMA55 为多头 (BULLISH); EMA21 < EMA55 为空头 (BEARISH)。
 
 2. **入场时机 (Entry Rules - 宽容模式)**:
-   *鉴于4H K线时间跨度大，不要因错过交叉瞬间而放弃良好趋势。*
-   - **做多 (Long)**: 
-     - 基础条件: EMA21 > EMA55 (趋势向上)。
-     - 触发时机 A: 刚刚发生金叉 (Golden Cross) 且 K线收阳。
-     - 触发时机 B (宽容): 趋势已确立，但价格回调至 EMA21 附近 (Pullback Support) 且未跌破 EMA55。
-     - 触发时机 C (宽容): 金叉发生后的 1-3 根K线内，价格处于合理区间，未过度偏离 (无暴涨追高嫌疑)。
-   
-   - **做空 (Short)**: 
-     - 基础条件: EMA21 < EMA55 (趋势向下)。
-     - 触发时机 A: 刚刚发生死叉 (Death Cross) 且 K线收阴。
-     - 触发时机 B (宽容): 趋势已确立，但价格反弹至 EMA21 附近 (Pullback Resistance) 且未突破 EMA55。
-     - 触发时机 C (宽容): 死叉发生后的 1-3 根K线内，价格处于合理区间，未过度偏离 (无暴跌追低嫌疑)。
+   - **做多 (Long)**: 基础条件 EMA21 > EMA55。触发: 金叉且收阳，或趋势中回调至EMA21不破。
+   - **做空 (Short)**: 基础条件 EMA21 < EMA55。触发: 死叉且收阴，或趋势中反弹至EMA21不破。
 
 3. **止损坚决带好 (Stop Loss)**:
    - **位置**: 必须设在前一根 4H K线的 高点(空单SL) 或 低点(多单SL)。
    - **多单 SL**: ${emaAnalysis.prevLow}
    - **空单 SL**: ${emaAnalysis.prevHigh}
-   - **风控**: 单笔亏损不得超过总本金的 5%。如果计算出的 SL 导致亏损 > 5%，必须减少开仓数量。
+   - **风控**: 单笔亏损不得超过总本金的 5%。
 
-4. **"滚仓式"加码 (Rolling)**:
-   - **首仓**: 资金的 5%。
+4. **"滚仓式"加码 (Rolling - 资金充足时)**:
+   - **前提**: 可用资金 > 总权益的5%。
    - **加码**: 当持仓盈利达到 5% 时，立即加仓 (使用另外 5% 资金)。
-   - **循环**: 每盈利 5% 加一次，直到趋势反转 (EMA再次交叉)。
    - **退出**: 一旦 EMA 发生反向交叉，立即平掉所有仓位。
 
-5. **情报整合**: 
-   - 请结合提供的【互联网情报】，在 'hot_events_overview' 字段中简要分析当前市场宏观情绪（利多/利空/中性）及可能影响趋势的重大风险事件。
+5. **止盈规则 (资金耗尽时触发)**:
+   - **前提**: 可用资金不足以支付下一次滚仓 (进入止盈模式)。
+   - **分级止盈**:
+     - 收益率 >= 5%: 平掉 **50%** 持仓 (减仓保利)。请输出反向开单指令 (多单则SELL，空单则BUY)。
+     - 收益率 >= 8%: 平掉 **100%** 持仓 (清仓落袋)。请输出 **CLOSE** 指令。
+
+6. **情报整合**: 
+   - 请结合提供的【互联网情报】，在 'hot_events_overview' 字段中简要分析当前市场宏观情绪及潜在风险。
 
 **当前持仓状态**:
 ${positionContext}
 
 **操作指令**:
-- **BUY / SELL**: 开首仓 或 滚仓加码。
-- **CLOSE**: 趋势反转全平。
-- **UPDATE_TPSL**: 仅用于移动止损，严禁取消止损。
-- **HOLD**: 无信号、趋势不明或持仓未达加码标准。
+- **BUY / SELL**: 开首仓、滚仓加码 或 止盈减仓。
+- **CLOSE**: 趋势反转全平 或 8%止盈清仓。
+- **UPDATE_TPSL**: 仅用于移动止损。
+- **HOLD**: 无信号、趋势不明或持仓未达加码/止盈标准。
 
 请输出 JSON 决策。
 `;
@@ -270,7 +278,7 @@ ${positionContext}
   const responseSchema = `
   {
     "stage_analysis": "EMA 4H 趋势分析...",
-    "market_assessment": "当前是否满足入场(含回调宽容)/滚仓条件...",
+    "market_assessment": "当前是否满足入场(含回调宽容)/滚仓/止盈条件...",
     "hot_events_overview": "结合上方[互联网情报]分析当前市场宏观情绪及潜在风险事件...",
     "trading_decision": {
       "action": "BUY|SELL|HOLD|CLOSE|UPDATE_TPSL",
@@ -280,7 +288,7 @@ ${positionContext}
       "stop_loss": "必须填入前K高低点",
       "profit_target": "0"
     },
-    "reasoning": "严格基于四大原则解释原因"
+    "reasoning": "严格基于原则解释原因"
   }
   `;
 
@@ -302,11 +310,22 @@ ${positionContext}
     }
 
     decision.action = decision.trading_decision.action.toUpperCase() as any;
+
+    // --- CRITICAL FIX: Explicitly set target posSide ---
+    // Prevent TP logic (e.g. SELL) from being interpreted as Open Short when we hold Long.
+    if (hasPosition && primaryPosition) {
+        // If we have a position, ALL actions (BUY/SELL) target this position (Add or Reduce).
+        // Cast string to specific union type as we know it comes from OKX 'long'|'short' context
+        decision.posSide = primaryPosition.posSide as 'long' | 'short'; 
+    } else {
+        // If no position, infer side from action
+        decision.posSide = decision.action === 'BUY' ? 'long' : 'short';
+    }
     
     // --- 资金管理逻辑 (Code Logic Override for Safety) ---
     // Rule: Initial 5% of Equity. Rolling 5% of Equity.
     const targetMargin = totalEquity * 0.05; // 5% of Total Equity
-    const leverage = 20; // Standardize leverage for this strategy to sensible level or user config
+    const leverage = 20; // Standardize leverage
     
     // Calculate contracts for 5% equity
     const priceForCalc = currentPrice > 0 ? currentPrice : 1;
@@ -315,29 +334,55 @@ ${positionContext}
     const targetContracts = targetPosValue / contractVal;
     
     if (decision.action === 'BUY' || decision.action === 'SELL') {
-        // Enforce 5% sizing
-        decision.size = Math.max(targetContracts, 0.01).toFixed(2);
-        decision.leverage = leverage.toString();
         
-        // Rolling Logic Check
-        if (hasPosition) {
-            // If AI says BUY/SELL while holding, it must be rolling or reversing
-            // If reversing, AI should say CLOSE + OPEN (Complex, but let's assume CLOSE first then next tick OPEN)
-            // If Rolling:
-            if (!rollingTrigger) {
-                 // Prevent adding if profit < 5%
-                 console.warn("AI attempted to add position but profit < 5%. Forcing HOLD.");
-                 decision.action = 'HOLD';
-                 decision.reasoning += " [系统拦截: 未达 5% 盈利加仓标准]";
-            }
+        // Detect if this is a Reducing Action (TP) or Adding Action (Open/Roll)
+        const isReducing = hasPosition && (
+            (primaryPosition?.posSide === 'long' && decision.action === 'SELL') ||
+            (primaryPosition?.posSide === 'short' && decision.action === 'BUY')
+        );
+
+        if (isReducing) {
+             // --- Take Profit Logic (Half Position) ---
+             // Only allow reduction if specific TP conditions are met or AI insists
+             // Strategy Rule: If !canRoll and uplRatio >= 0.05, trim 50%.
+             if (!canRoll && uplRatio >= 0.05) {
+                 const currentPos = parseFloat(primaryPosition!.pos);
+                 decision.size = (currentPos * 0.5).toFixed(2);
+                 decision.reasoning += " [系统执行: 资金不足触发5%止盈减仓]";
+             } else {
+                 // Fallback for other manual reductions or misfires, default to standard chunk
+                 decision.size = Math.max(targetContracts, 0.01).toFixed(2);
+             }
+        } else {
+             // --- Opening or Rolling Logic ---
+             decision.size = Math.max(targetContracts, 0.01).toFixed(2);
+             
+             // Rolling Logic Check
+             if (hasPosition) {
+                // If AI tries to Add (BUY for Long, SELL for Short)
+                if (!rollingTrigger) {
+                    // Prevent adding if profit < 5%
+                    console.warn("AI attempted to add position but profit < 5%. Forcing HOLD.");
+                    decision.action = 'HOLD';
+                    decision.reasoning += " [系统拦截: 未达 5% 盈利加仓标准]";
+                } else if (!canRoll) {
+                    // Prevent adding if funds exhausted
+                    console.warn("AI attempted to add position but funds exhausted. Forcing HOLD.");
+                    decision.action = 'HOLD';
+                    decision.reasoning += " [系统拦截: 资金耗尽，无法滚仓]";
+                }
+             }
         }
+
+        decision.leverage = leverage.toString();
+
     } else {
+        // HOLD, CLOSE, UPDATE_TPSL
         decision.size = "0";
         decision.leverage = leverage.toString();
     }
     
     // Fill required fields
-    // Ensure news analysis is populated even if AI misses it (though schema enforces it)
     if (!decision.hot_events_overview) {
         decision.hot_events_overview = "AI未提供具体情报分析";
     }
