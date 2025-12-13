@@ -89,6 +89,7 @@ export interface AIDecision {
   leverage: string; // Normalized
   rollover_trigger?: string; // Derived or default
   timestamp?: number;
+  posSide?: 'long' | 'short'; // NEW: Explicitly target a specific position side (prevents accidental reverse opens)
 }
 
 export interface SystemLog {
