@@ -157,7 +157,7 @@ export const getTradingDecision = async (
   const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
   
   let netPnL = 0;
-  let uplRatio = 0;
+  let netProfitRatio = 0; // Net ROE
   let rollingTrigger = false;
   let positionContext = "当前无持仓";
   let canRoll = true;
@@ -171,35 +171,46 @@ export const getTradingDecision = async (
       const sizeCoin = sizeContracts * CONTRACT_VAL_ETH;
       const entryPrice = parseFloat(p.avgPx);
       const upl = parseFloat(p.upl);
-      uplRatio = parseFloat(p.uplRatio);
+      // const uplRatio = parseFloat(p.uplRatio); // Unused for logic now, using netProfitRatio
       
       const currentVal = sizeCoin * currentPrice;
       const entryVal = sizeCoin * entryPrice;
-      const fees = (currentVal * TAKER_FEE_RATE) + (entryVal * TAKER_FEE_RATE);
-      netPnL = upl - fees;
+      
+      // Strictly Calculate Net PnL (Subtracting Two-way Fees)
+      const openFee = entryVal * TAKER_FEE_RATE;
+      const closeFee = currentVal * TAKER_FEE_RATE;
+      const totalFees = openFee + closeFee;
+      
+      netPnL = upl - totalFees;
+      
+      const margin = parseFloat(p.margin);
+      if (margin > 0) {
+          netProfitRatio = netPnL / margin;
+      }
 
       // Check Funds for Rolling
       canRoll = availableEquity >= minReqEquity;
 
-      // Rolling Logic Trigger: Profit > 5%
-      // Note: uplRatio is a good proxy. 0.05 = 5%.
-      if (uplRatio >= 0.05) {
+      // Rolling Logic Trigger: NET Profit > 5%
+      if (netProfitRatio >= 0.05) {
           rollingTrigger = true;
       }
 
       positionContext = `
-      === 持仓详情 ===
+      === 持仓详情 (净利润计价) ===
       方向: ${p.posSide.toUpperCase()}
       持仓量: ${p.pos} 张
       开仓均价: ${entryPrice.toFixed(2)}
-      浮盈比例: ${(uplRatio * 100).toFixed(2)}%
-      净利润: ${netPnL.toFixed(2)} U
+      预估双边手续费: ${totalFees.toFixed(2)} U
+      浮动盈亏 (UPL): ${upl.toFixed(2)} U
+      净利润 (Net PnL): ${netPnL.toFixed(2)} U
+      净收益率 (Net ROE): ${(netProfitRatio * 100).toFixed(2)}%
       
       === 资金与滚仓状态 ===
       滚仓资金门槛 (5%): ${minReqEquity.toFixed(2)} U
       当前可用资金: ${availableEquity.toFixed(2)} U
       资金是否充足: ${canRoll ? "YES" : "NO (进入直营/止盈模式)"}
-      收益达标 (5%): ${rollingTrigger ? "YES" : "NO"}
+      净利润达标 (5%): ${rollingTrigger ? "YES" : "NO"}
       `;
   } else {
       // Empty position, check if enough to open
@@ -225,13 +236,18 @@ export const getTradingDecision = async (
 
   const systemPrompt = `
 你是一个严格执行 **EMA趋势策略** 的交易机器人。
-你 **必须** 忽略所有其他指标（RSI, MACD, Bollinger等），仅关注 **EMA21** 和 **EMA55** 的 **4H** 走势。
+你 **必须** 忽略所有其他指标，仅关注 **EMA21** 和 **EMA55** 的 **4H** 走势。
 
 **市场技术面数据**:
 ${marketDataBlock}
 
 **互联网情报**:
 ${newsContext}
+
+**特别说明 (Profit Definition)**:
+本策略中所有提到的“利润”、“收益”均指 **净利润 (Net Profit)**。
+**净利润 = 浮动盈亏 - 双边手续费**。
+**终极目标**: 在严格保本的前提下，通过滚仓实现净利润的无限放大。
 
 **核心原则 (不可违背)**:
 
@@ -251,14 +267,14 @@ ${newsContext}
 
 4. **"滚仓式"加码 (Rolling - 资金充足时)**:
    - **前提**: 可用资金 > 总权益的5%。
-   - **加码**: 当持仓盈利达到 5% 时，立即加仓 (使用另外 5% 资金)。
+   - **加码**: 当持仓 **净利润** 达到 5% (Net ROE >= 5%) 时，立即加仓 (使用另外 5% 资金)。
    - **退出**: 一旦 EMA 发生反向交叉，立即平掉所有仓位。
 
 5. **止盈规则 (资金耗尽时触发)**:
    - **前提**: 可用资金不足以支付下一次滚仓 (进入止盈模式)。
-   - **分级止盈**:
-     - 收益率 >= 5%: 平掉 **50%** 持仓 (减仓保利)。请输出反向开单指令 (多单则SELL，空单则BUY)。
-     - 收益率 >= 8%: 平掉 **100%** 持仓 (清仓落袋)。请输出 **CLOSE** 指令。
+   - **分级止盈 (基于净利润)**:
+     - **净收益率** >= 5%: 平掉 **50%** 持仓 (减仓保利)。请输出反向开单指令。
+     - **净收益率** >= 8%: 平掉 **100%** 持仓 (清仓落袋)。请输出 **CLOSE** 指令。
 
 6. **情报整合**: 
    - 请结合提供的【互联网情报】，在 'hot_events_overview' 字段中简要分析当前市场宏观情绪及潜在风险。
@@ -268,7 +284,7 @@ ${positionContext}
 
 **操作指令**:
 - **BUY / SELL**: 开首仓、滚仓加码 或 止盈减仓。
-- **CLOSE**: 趋势反转全平 或 8%止盈清仓。
+- **CLOSE**: 趋势反转全平 或 8%净利止盈清仓。
 - **UPDATE_TPSL**: 仅用于移动止损。
 - **HOLD**: 无信号、趋势不明或持仓未达加码/止盈标准。
 
@@ -312,13 +328,9 @@ ${positionContext}
     decision.action = decision.trading_decision.action.toUpperCase() as any;
 
     // --- CRITICAL FIX: Explicitly set target posSide ---
-    // Prevent TP logic (e.g. SELL) from being interpreted as Open Short when we hold Long.
     if (hasPosition && primaryPosition) {
-        // If we have a position, ALL actions (BUY/SELL) target this position (Add or Reduce).
-        // Cast string to specific union type as we know it comes from OKX 'long'|'short' context
         decision.posSide = primaryPosition.posSide as 'long' | 'short'; 
     } else {
-        // If no position, infer side from action
         decision.posSide = decision.action === 'BUY' ? 'long' : 'short';
     }
     
@@ -344,13 +356,13 @@ ${positionContext}
         if (isReducing) {
              // --- Take Profit Logic (Half Position) ---
              // Only allow reduction if specific TP conditions are met or AI insists
-             // Strategy Rule: If !canRoll and uplRatio >= 0.05, trim 50%.
-             if (!canRoll && uplRatio >= 0.05) {
+             // Strategy Rule: If !canRoll and netProfitRatio >= 0.05, trim 50%.
+             // Use netProfitRatio calculated above
+             if (!canRoll && netProfitRatio >= 0.05) {
                  const currentPos = parseFloat(primaryPosition!.pos);
                  decision.size = (currentPos * 0.5).toFixed(2);
-                 decision.reasoning += " [系统执行: 资金不足触发5%止盈减仓]";
+                 decision.reasoning += " [系统执行: 资金不足触发5%净利止盈减仓]";
              } else {
-                 // Fallback for other manual reductions or misfires, default to standard chunk
                  decision.size = Math.max(targetContracts, 0.01).toFixed(2);
              }
         } else {
@@ -361,10 +373,10 @@ ${positionContext}
              if (hasPosition) {
                 // If AI tries to Add (BUY for Long, SELL for Short)
                 if (!rollingTrigger) {
-                    // Prevent adding if profit < 5%
-                    console.warn("AI attempted to add position but profit < 5%. Forcing HOLD.");
+                    // Prevent adding if Net Profit < 5%
+                    console.warn("AI attempted to add position but Net Profit < 5%. Forcing HOLD.");
                     decision.action = 'HOLD';
-                    decision.reasoning += " [系统拦截: 未达 5% 盈利加仓标准]";
+                    decision.reasoning += " [系统拦截: 净利润未达 5% 加仓标准]";
                 } else if (!canRoll) {
                     // Prevent adding if funds exhausted
                     console.warn("AI attempted to add position but funds exhausted. Forcing HOLD.");
