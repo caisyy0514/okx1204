@@ -5,7 +5,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig } from './types';
-import { DEFAULT_CONFIG, INSTRUMENT_ID } from './constants';
+import { DEFAULT_CONFIG, INSTRUMENT_ID, CONTRACT_VAL_ETH, TAKER_FEE_RATE } from './constants';
 import * as okxService from './services/okxService';
 import * as aiService from './services/aiService';
 
@@ -118,14 +118,14 @@ const runTradingLoop = async () => {
         const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
         
         if (hasPosition) {
-            // [Holding Mode]: High Frequency (30s) for tight risk management and rolling
-            aiInterval = 120000; 
-            modeText = "持仓高频战备 (120s)";
+            // [Holding Mode]: High Frequency (15s) for tight risk management and rolling
+            aiInterval = 15000; 
+            modeText = "持仓高频战备 (15s)";
         } else {
-            // [Empty Mode]: Very Low Frequency (10m) for 4H Strategy Token Saving
+            // [Empty Mode]: Very Low Frequency (5m) for 4H Strategy Token Saving
             // 4H candles take 240 mins to close. Checking every 5 mins is sufficient for trend & pullback entries.
-            aiInterval = 600000; 
-            modeText = "空仓节能扫描 (10min)";
+            aiInterval = 300000; 
+            modeText = "空仓节能扫描 (5min)";
         }
     }
 
@@ -195,11 +195,24 @@ const runTradingLoop = async () => {
                 }
             }
 
-            // Rolling Logic
-            if (decision.action === 'HOLD' && primaryPosition) {
-                const uplRatio = parseFloat(primaryPosition.uplRatio) * 100;
-                if (uplRatio >= 50) {
-                     addLog('SUCCESS', `触发自动滚仓: 收益率 ${uplRatio.toFixed(2)}%`);
+            // Rolling Logic (Server Safeguard)
+            if (decision.action === 'HOLD' && primaryPosition && marketData?.ticker) {
+                const currentPrice = parseFloat(marketData.ticker.last);
+                const posSize = parseFloat(primaryPosition.pos);
+                const avgPx = parseFloat(primaryPosition.avgPx);
+                const upl = parseFloat(primaryPosition.upl);
+                const margin = parseFloat(primaryPosition.margin);
+                
+                // Calculate Net Profit for Server Rolling Trigger
+                const sizeCoin = posSize * CONTRACT_VAL_ETH;
+                const openFee = sizeCoin * avgPx * TAKER_FEE_RATE;
+                const closeFee = sizeCoin * currentPrice * TAKER_FEE_RATE;
+                const netPnL = upl - (openFee + closeFee);
+                const netRoe = margin > 0 ? (netPnL / margin) * 100 : 0;
+
+                // Failsafe auto-rolling logic (aggressive)
+                if (netRoe >= 50) {
+                     addLog('SUCCESS', `触发自动滚仓: 净收益率 ${netRoe.toFixed(2)}%`);
                      try {
                          await okxService.addMargin({
                             instId: INSTRUMENT_ID,
