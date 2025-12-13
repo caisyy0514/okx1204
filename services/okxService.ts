@@ -263,7 +263,12 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     // --- BUY / SELL ---
     
     // 1. Determine Position Side
-    const posSide = order.action === 'BUY' ? 'long' : 'short';
+    // CRITICAL FIX: Use the explicit posSide from decision if available.
+    // This prevents "SELL" (Take Profit on Long) from being treated as "Open Short".
+    const posSide = order.posSide || (order.action === 'BUY' ? 'long' : 'short');
+    
+    // Side logic remains: To Open Long -> Buy. To Close Long -> Sell. To Open Short -> Sell. To Close Short -> Buy.
+    // The AIDecision 'action' (BUY/SELL) already represents the direction of the trade order, not necessarily the position side.
     const side = order.action === 'BUY' ? 'buy' : 'sell';
 
     // 2. Set Leverage First (Crucial for V5)
@@ -500,4 +505,4 @@ function generateMockAccountData(): AccountContext {
     },
     positions: []
   };
-}
+                                                                                    }
